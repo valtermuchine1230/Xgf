@@ -1,0 +1,181 @@
+name: Veriscope Email Campaign Sender
+
+on:
+  schedule:
+    # Monday-Friday at 00:00 UTC
+    - cron: '0 0 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dataset_source:
+        description: 'Data source: env (teste) or hf (producao)'
+        required: true
+        default: 'hf'
+        type: choice
+        options:
+          - env
+          - hf
+      day:
+        description: 'Campaign day (1-5)'
+        required: true
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '3'
+          - '4'
+          - '5'
+
+concurrency:
+  group: 'veriscope-campaign-${{ github.ref }}'
+  cancel-in-progress: false
+
+jobs:
+  determine-day:
+    name: Determine Campaign Day
+    runs-on: ubuntu-latest
+    outputs:
+      campaign_day: ${{ steps.day.outputs.campaign_day }}
+      dataset_source: ${{ steps.source.outputs.dataset_source }}
+    steps:
+      - name: Determine Day
+        id: day
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "campaign_day=${{ github.event.inputs.day }}" >> $GITHUB_OUTPUT
+          else
+            DOW=$(date +%u)
+            if [ "$DOW" -le 5 ]; then
+              echo "campaign_day=$DOW" >> $GITHUB_OUTPUT
+            else
+              echo "campaign_day=1" >> $GITHUB_OUTPUT
+            fi
+          fi
+      - name: Determine Dataset Source
+        id: source
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "dataset_source=${{ github.event.inputs.dataset_source }}" >> $GITHUB_OUTPUT
+          else
+            echo "dataset_source=hf" >> $GITHUB_OUTPUT
+          fi
+      - name: Display Configuration
+        run: |
+          echo "📅 Campaign Day: ${{ steps.day.outputs.campaign_day }}"
+          echo "📊 Dataset Source: ${{ steps.source.outputs.dataset_source }}"
+
+  send-parallel:
+    name: Send Campaign (20 Runners)
+    needs: determine-day
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Configure Environment
+        run: |
+          mkdir -p ./data
+          mkdir -p ./logs
+      - name: Run Campaign (Runner ${{ matrix.runner }})
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # deSEC tokens (1..26)
+          DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
+          DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
+          DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
+          DESEC_TOKEN_4: ${{ secrets.DESEC_TOKEN_4 }}
+          DESEC_TOKEN_5: ${{ secrets.DESEC_TOKEN_5 }}
+          DESEC_TOKEN_6: ${{ secrets.DESEC_TOKEN_6 }}
+          DESEC_TOKEN_7: ${{ secrets.DESEC_TOKEN_7 }}
+          DESEC_TOKEN_8: ${{ secrets.DESEC_TOKEN_8 }}
+          DESEC_TOKEN_9: ${{ secrets.DESEC_TOKEN_9 }}
+          DESEC_TOKEN_10: ${{ secrets.DESEC_TOKEN_10 }}
+          DESEC_TOKEN_11: ${{ secrets.DESEC_TOKEN_11 }}
+          DESEC_TOKEN_12: ${{ secrets.DESEC_TOKEN_12 }}
+          DESEC_TOKEN_13: ${{ secrets.DESEC_TOKEN_13 }}
+          DESEC_TOKEN_14: ${{ secrets.DESEC_TOKEN_14 }}
+          DESEC_TOKEN_15: ${{ secrets.DESEC_TOKEN_15 }}
+          DESEC_TOKEN_16: ${{ secrets.DESEC_TOKEN_16 }}
+          DESEC_TOKEN_17: ${{ secrets.DESEC_TOKEN_17 }}
+          DESEC_TOKEN_18: ${{ secrets.DESEC_TOKEN_18 }}
+          DESEC_TOKEN_19: ${{ secrets.DESEC_TOKEN_19 }}
+          DESEC_TOKEN_20: ${{ secrets.DESEC_TOKEN_20 }}
+          DESEC_TOKEN_21: ${{ secrets.DESEC_TOKEN_21 }}
+          DESEC_TOKEN_22: ${{ secrets.DESEC_TOKEN_22 }}
+          DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
+          DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
+          DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
+          DESEC_TOKEN_26: ${{ secrets.DESEC_TOKEN_26 }}
+          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
+          KUMOMTA_HOST: ${{ secrets.KUMOMTA_HOST }}
+          KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
+          DESEC_DOMAIN: ${{ secrets.DESEC_DOMAIN }}
+          CAMPAIGN_FROM_NAME: ${{ secrets.CAMPAIGN_FROM_NAME }}
+          TEST_EMAIL_GMAIL: ${{ secrets.TEST_EMAIL_GMAIL }}
+          TEST_EMAIL_OUTLOOK: ${{ secrets.TEST_EMAIL_OUTLOOK }}
+          TEST_EMAIL_PROTONMAIL: ${{ secrets.TEST_EMAIL_PROTONMAIL }}
+          TEST_EMAIL_HOTMAIL: ${{ secrets.TEST_EMAIL_HOTMAIL }}
+          BUTTON_URL_1: ${{ secrets.BUTTON_URL_1 }}
+          BUTTON_URL_2: ${{ secrets.BUTTON_URL_2 }}
+          BUTTON_URL_3: ${{ secrets.BUTTON_URL_3 }}
+          BUTTON_URL_4: ${{ secrets.BUTTON_URL_4 }}
+          BUTTON_URL_5: ${{ secrets.BUTTON_URL_5 }}
+          EMAIL_SUBJECT_1: ${{ secrets.EMAIL_SUBJECT_1 }}
+          EMAIL_SUBJECT_2: ${{ secrets.EMAIL_SUBJECT_2 }}
+          EMAIL_SUBJECT_3: ${{ secrets.EMAIL_SUBJECT_3 }}
+          EMAIL_SUBJECT_4: ${{ secrets.EMAIL_SUBJECT_4 }}
+          EMAIL_SUBJECT_5: ${{ secrets.EMAIL_SUBJECT_5 }}
+          LOG_LEVEL: INFO
+          SAVE_PATH: ./data
+        run: |
+          python veriscope_main.py send \
+            --dataset-source ${{ needs.determine-day.outputs.dataset_source }} \
+            --day ${{ needs.determine-day.outputs.campaign_day }} \
+            --runner-id ${{ matrix.runner }} \
+            --total-runners 20
+      - name: Upload Logs as Artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: campaign-logs-day${{ needs.determine-day.outputs.campaign_day }}-runner${{ matrix.runner }}
+          path: ./data/veriscope.log
+          retention-days: 30
+
+  report:
+    name: Generate Report
+    needs: send-parallel
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+      - name: Generate Campaign Report
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          LOG_LEVEL: INFO
+          SAVE_PATH: ./data
+        run: |
+          python veriscope_main.py report --day ${{ needs.determine-day.outputs.campaign_day }}
+      - name: Display Summary
+        run: |
+          echo "✅ Campaign execution complete"
+          echo "📊 Reports uploaded to HuggingFace (if HF_TOKEN configured)"
