@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VERISCOPE REAL TEST — 1 DOMÍNIO + 1 SUB-SUBDOMÍNIO REAL
-=========================================================
-- Cria veriscope0.dedyn.io (se não existir)
-- Cria sub0.veriscope0.dedyn.io
-- Configura SPF, DKIM, DMARC via API deSEC real
-- Envia 5 emails de teste assinados com DKIM
-- Usa KumoMTA (ou direct SMTP) para envio
+VERISCOPE REAL TEST — 1 CONTA REAL (SEM CRIAR DOMÍNIOS ADICIONAIS)
+===================================================================
+- Usa o domínio principal veriscope0.dedyn.io (já existe)
+- Adiciona registos SPF, DKIM, DMARC para sub0.veriscope0.dedyn.io
+- Gera chave DKIM e assina emails
+- Envia 5 emails de teste
 
-Uso: python veriscope_test_real.py
+Uso: python veriscope_real.py
 """
 
 import os
@@ -21,14 +20,13 @@ import logging
 import hashlib
 import base64
 import requests
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Tuple
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ============================================================================
-# BIBLIOTECAS OPCIONAIS (verificar importação)
+# VERIFICAÇÃO DE DEPENDÊNCIAS
 # ============================================================================
 
 try:
@@ -62,25 +60,18 @@ except ImportError:
     print("⚠️  email-validator não instalado. Execute: pip install email-validator")
 
 # ============================================================================
-# CONFIGURAÇÃO — ALTERE AQUI SE NECESSÁRIO
+# CONFIGURAÇÃO
 # ============================================================================
 
-# Token deSEC (substituir ou usar variável de ambiente)
 DESEC_TOKEN = os.getenv("DESEC_TOKEN_1", "SEU_TOKEN_AQUI")
-
-# Domínio principal e sub-subdomínio
 MAIN_DOMAIN = "veriscope0.dedyn.io"
 SUB_NAME = "sub0"
-FULL_DOMAIN = f"{SUB_NAME}.{MAIN_DOMAIN}"
+FULL_EMAIL_DOMAIN = f"{SUB_NAME}.{MAIN_DOMAIN}"
 
-# IPv6 (se não tiveres, usa um placeholder; o SPF vai funcionar com este IP)
 IPV6 = os.getenv("TEST_IPV6", "2a11:6c7:f10:5::1")
-
-# SMTP (KumoMTA ou outro)
 SMTP_HOST = os.getenv("KUMOMTA_HOST", "127.0.0.1")
 SMTP_PORT = int(os.getenv("KUMOMTA_PORT", "2525"))
 
-# Emails de teste
 TEST_EMAILS = [
     "macuacuavalter71@gmail.com",
     "stanl-eyb-75@aliasvault.net",
@@ -110,109 +101,50 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# FUNÇÕES DE API DESEC (REAIS)
+# FUNÇÕES DA API deSEC (REAIS)
 # ============================================================================
 
 def call_desec_api(method: str, endpoint: str, token: str, data: dict = None) -> dict:
-    """Faz uma chamada à API deSEC com tratamento de erros."""
     url = f"https://desec.io/api/v1/{endpoint}"
-    headers = {
-        "Authorization": f"Token {token}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
     logger.info(f"🌐 {method} {url}")
     response = requests.request(method, url, json=data, headers=headers, timeout=15)
     if response.status_code not in [200, 201, 204]:
-        error_msg = f"deSEC API error {response.status_code}: {response.text[:200]}"
-        logger.error(error_msg)
-        raise Exception(error_msg)
+        raise Exception(f"deSEC API error {response.status_code}: {response.text[:200]}")
     return response.json() if response.text else {}
 
-def create_domain(domain: str, token: str) -> bool:
-    """Cria um domínio principal (ex: veriscope0.dedyn.io)."""
+def ensure_domain_exists(domain: str, token: str) -> bool:
+    """Cria o domínio principal se não existir."""
     try:
-        # Verificar se já existe
+        call_desec_api("GET", f"domains/{domain}/", token)
+        logger.info(f"ℹ️ Domínio {domain} já existe.")
+        return True
+    except:
         try:
-            call_desec_api("GET", f"domains/{domain}/", token)
-            logger.info(f"ℹ️ Domínio {domain} já existe.")
+            call_desec_api("POST", "domains/", token, {"name": domain})
+            logger.info(f"✅ Domínio {domain} criado com sucesso.")
             return True
-        except:
-            pass
-        # Criar
-        call_desec_api("POST", "domains/", token, {"name": domain})
-        logger.info(f"✅ Domínio {domain} criado com sucesso.")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Falha ao criar domínio {domain}: {e}")
-        return False
+        except Exception as e:
+            logger.error(f"❌ Falha ao criar domínio {domain}: {e}")
+            return False
 
-def create_subdomain(domain: str, sub: str, token: str) -> bool:
-    """Cria um sub-subdomínio (ex: sub0.veriscope0.dedyn.io)."""
-    full = f"{sub}.{domain}"
-    try:
-        # Verificar se já existe
-        try:
-            call_desec_api("GET", f"domains/{full}/", token)
-            logger.info(f"ℹ️ Subdomínio {full} já existe.")
-            return True
-        except:
-            pass
-        # Criar
-        call_desec_api("POST", "domains/", token, {"name": full})
-        logger.info(f"✅ Subdomínio {full} criado com sucesso.")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Falha ao criar subdomínio {full}: {e}")
-        return False
-
-def configure_spf(domain: str, sub: str, ipv6: str, token: str) -> bool:
-    """Configura SPF para o subdomínio."""
+def add_rrset(domain: str, subname: str, rtype: str, records: list, token: str, ttl: int = 3600) -> bool:
+    """
+    Adiciona ou atualiza um conjunto de registos DNS para um subdomínio.
+    Exemplo: subname="sub0", rtype="TXT", records=["v=spf1 ..."]
+    """
     try:
         data = [{
-            "subname": sub,
-            "type": "TXT",
-            "ttl": 3600,
-            "records": [f"v=spf1 ip6:{ipv6}/128 -all"]
+            "subname": subname,
+            "type": rtype,
+            "ttl": ttl,
+            "records": records
         }]
         call_desec_api("PUT", f"domains/{domain}/rrsets/", token, data)
-        logger.info(f"✅ SPF configurado para {sub}.{domain}")
+        logger.info(f"✅ {rtype} para {subname}.{domain} configurado.")
         return True
     except Exception as e:
-        logger.error(f"❌ Falha SPF: {e}")
-        return False
-
-def publish_dkim(domain: str, sub: str, public_key_b64: str, token: str) -> bool:
-    """Publica a chave pública DKIM no DNS."""
-    try:
-        selector = f"s2026._domainkey.{sub}"
-        data = [{
-            "subname": selector,
-            "type": "TXT",
-            "ttl": 3600,
-            "records": [f"v=DKIM1; k=rsa; p={public_key_b64}"]
-        }]
-        call_desec_api("PUT", f"domains/{domain}/rrsets/", token, data)
-        logger.info(f"✅ DKIM publicado para {sub}.{domain}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Falha DKIM: {e}")
-        return False
-
-def configure_dmarc(domain: str, sub: str, token: str) -> bool:
-    """Configura DMARC para o subdomínio."""
-    try:
-        dmarc_sub = f"_dmarc.{sub}"
-        data = [{
-            "subname": dmarc_sub,
-            "type": "TXT",
-            "ttl": 3600,
-            "records": [f"v=DMARC1; p=quarantine; pct=100; adkim=r; aspf=r; rua=mailto:dmarc@{sub}.{domain}"]
-        }]
-        call_desec_api("PUT", f"domains/{domain}/rrsets/", token, data)
-        logger.info(f"✅ DMARC configurado para {sub}.{domain}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Falha DMARC: {e}")
+        logger.error(f"❌ Falha ao configurar {rtype} para {subname}: {e}")
         return False
 
 # ============================================================================
@@ -220,7 +152,6 @@ def configure_dmarc(domain: str, sub: str, token: str) -> bool:
 # ============================================================================
 
 def generate_dkim_keypair() -> Tuple[str, str]:
-    """Gera par de chaves RSA 2048 para DKIM."""
     if not HAS_CRYPTO:
         raise ImportError("cryptography não instalado")
     private_key = rsa.generate_private_key(
@@ -242,7 +173,6 @@ def generate_dkim_keypair() -> Tuple[str, str]:
     return private_pem, public_b64
 
 def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, selector: str = "s2026") -> bytes:
-    """Assina uma mensagem com DKIM usando dkimpy."""
     if not HAS_DKIM:
         logger.warning("⚠️ dkimpy não instalado, a enviar sem assinatura.")
         return message
@@ -266,12 +196,9 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
 async def send_email(to_email: str, subject: str, html_body: str,
                      from_email: str, private_key_pem: str = None,
                      smtp_host: str = "127.0.0.1", smtp_port: int = 2525) -> Tuple[bool, str]:
-    """Envia email via SMTP (KumoMTA ou directo)."""
     if not HAS_SMTP:
         return False, "aiosmtplib não instalado"
-
     try:
-        # Validar email
         if HAS_VALIDATOR:
             try:
                 validate_email(to_email)
@@ -279,7 +206,6 @@ async def send_email(to_email: str, subject: str, html_body: str,
                 logger.warning(f"Email inválido: {to_email} - {e}")
                 return False, "400 Invalid email"
 
-        # Construir mensagem
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{FROM_NAME} <{from_email}>"
         msg['To'] = to_email
@@ -292,13 +218,10 @@ async def send_email(to_email: str, subject: str, html_body: str,
         msg.attach(html_part)
 
         message_bytes = msg.as_bytes()
-
-        # Assinar com DKIM
         if private_key_pem:
             domain = from_email.split('@')[1]
             message_bytes = sign_message_with_dkim(message_bytes, private_key_pem, domain)
 
-        # Enviar via SMTP
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
@@ -311,17 +234,15 @@ async def send_email(to_email: str, subject: str, html_body: str,
 
         logger.info(f"✅ Email enviado para {to_email}")
         return True, "250 OK"
-
     except Exception as e:
         logger.error(f"❌ Erro ao enviar para {to_email}: {e}")
         return False, str(e)
 
 # ============================================================================
-# TEMPLATES HTML (5 DIAS, PORTUGUÊS)
+# TEMPLATES HTML (5 DIAS)
 # ============================================================================
 
 def get_email_html(day: int) -> str:
-    """Devolve o HTML para cada dia."""
     if day == 1:
         return """
         <h2>Posso mostrar-te algo amanhã?</h2>
@@ -332,7 +253,6 @@ def get_email_html(day: int) -> str:
         <p><strong>E se o problema não for falta de informação?</strong></p>
         <p>Nós começámos a pensar nisso há algum tempo.</p>
         <p><a href="https://veriscope-com-session-matrix.pages.dev/" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;">Ver a ideia</a></p>
-        <p>Até amanhã.</p>
         """
     elif day == 2:
         return """
@@ -359,7 +279,7 @@ def get_email_html(day: int) -> str:
         <p>Foi por isso que criámos o <strong>Veriscope Edge</strong>.</p>
         <p><a href="https://veriscope-com-session-matrix-access.pages.dev/" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;">Conhecer o Veriscope Edge</a></p>
         """
-    else:  # day == 5
+    else:
         return """
         <h2>Agora já conheces o quadro completo</h2>
         <p><strong>Session Matrix</strong> → Quando prestar atenção.</p>
@@ -371,7 +291,6 @@ def get_email_html(day: int) -> str:
         """
 
 def build_full_html(day: int) -> str:
-    """Constrói o HTML completo com CSS."""
     content = get_email_html(day)
     logo = """
     <div style="text-align:center;margin-bottom:20px;">
@@ -408,48 +327,43 @@ def build_full_html(day: int) -> str:
 # ============================================================================
 
 async def main():
-    logger.info("🚀 ===== VERISCOPE REAL TEST — 1 CONTA REAL =====")
+    logger.info("🚀 ===== VERISCOPE REAL TEST (SEM CRIAR SUBDOMÍNIOS) =====")
 
-    # 0. Verificar token
     token = DESEC_TOKEN
     if not token or token == "SEU_TOKEN_AQUI":
         logger.error("❌ DESEC_TOKEN não configurado. Define a variável de ambiente DESEC_TOKEN_1.")
         sys.exit(1)
 
-    # 1. Criar domínio principal
-    logger.info(f"🌐 A criar domínio principal {MAIN_DOMAIN}...")
-    if not create_domain(MAIN_DOMAIN, token):
-        logger.error("❌ Falha ao criar domínio principal. Abortar.")
+    # 1. Garantir que o domínio principal existe
+    if not ensure_domain_exists(MAIN_DOMAIN, token):
+        logger.error("❌ Falha ao criar/verificar domínio principal.")
         sys.exit(1)
 
-    # 2. Criar sub-subdomínio
-    logger.info(f"🌐 A criar sub-subdomínio {FULL_DOMAIN}...")
-    if not create_subdomain(MAIN_DOMAIN, SUB_NAME, token):
-        logger.error("❌ Falha ao criar sub-subdomínio. Abortar.")
-        sys.exit(1)
-
-    # 3. Gerar chaves DKIM
+    # 2. Gerar chave DKIM
     logger.info("🔑 Gerando chaves DKIM...")
-    private_key, public_key = generate_dkim_keypair()
-    logger.info(f"✅ Chave pública: {public_key[:40]}...")
+    private_key, public_key_b64 = generate_dkim_keypair()
+    logger.info(f"✅ Chave pública: {public_key_b64[:40]}...")
 
-    # 4. Configurar SPF
+    # 3. Configurar SPF para sub0.veriscope0.dedyn.io
     logger.info("🔧 Configurando SPF...")
-    if not configure_spf(MAIN_DOMAIN, SUB_NAME, IPV6, token):
+    if not add_rrset(MAIN_DOMAIN, SUB_NAME, "TXT", [f"v=spf1 ip6:{IPV6}/128 -all"], token):
         logger.warning("⚠️ SPF falhou, mas continuando...")
 
-    # 5. Publicar DKIM
+    # 4. Publicar DKIM (s2026._domainkey.sub0)
     logger.info("🔧 Publicando DKIM...")
-    if not publish_dkim(MAIN_DOMAIN, SUB_NAME, public_key, token):
+    dkim_subname = f"s2026._domainkey.{SUB_NAME}"
+    if not add_rrset(MAIN_DOMAIN, dkim_subname, "TXT", [f"v=DKIM1; k=rsa; p={public_key_b64}"], token):
         logger.warning("⚠️ DKIM falhou, mas continuando...")
 
-    # 6. Configurar DMARC
+    # 5. Configurar DMARC (_dmarc.sub0)
     logger.info("🔧 Configurando DMARC...")
-    if not configure_dmarc(MAIN_DOMAIN, SUB_NAME, token):
+    dmarc_subname = f"_dmarc.{SUB_NAME}"
+    dmarc_record = f"v=DMARC1; p=quarantine; pct=100; adkim=r; aspf=r; rua=mailto:dmarc@{FULL_EMAIL_DOMAIN}"
+    if not add_rrset(MAIN_DOMAIN, dmarc_subname, "TXT", [dmarc_record], token):
         logger.warning("⚠️ DMARC falhou, mas continuando...")
 
-    # 7. Enviar emails
-    from_email = f"alex@{FULL_DOMAIN}"
+    # 6. Enviar emails
+    from_email = f"alex@{FULL_EMAIL_DOMAIN}"
     logger.info(f"📧 A enviar 5 emails de {from_email} para:")
     for addr in TEST_EMAILS:
         logger.info(f"   - {addr}")
@@ -474,7 +388,7 @@ async def main():
         else:
             logger.error(f"❌ Email {day} falhou: {code}")
 
-        time.sleep(2)  # pequena pausa entre envios
+        time.sleep(2)
 
     logger.info("🎉 ===== TESTE CONCLUÍDO =====")
 
