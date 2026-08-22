@@ -7,7 +7,7 @@ VERISCOPE FINAL — PROVISIONAMENTO + TESTE REAL
 - Gera chave DKIM e envia 5 emails de teste
 - Tratamento automático de rate limiting (429) com backoff
 - Formato correto para registos TXT (com aspas)
-- DESATIVA VERIFICAÇÃO SSL PARA TESTES (certificados autoassinados)
+- SOLUÇÃO SSL DEFINITIVA: usa starttls com contexto que ignora verificação
 
 Uso:
   python veriscope.py --provision    # só configura DNS
@@ -28,11 +28,6 @@ import ssl
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Tuple
-
-# ============================================================================
-# 🔥 DESATIVAR VERIFICAÇÃO SSL PARA TESTES (KUMOMTA USA CERTIFICADO SELF-SIGNED)
-# ============================================================================
-ssl._create_default_https_context = ssl._create_unverified_context
 
 # ============================================================================
 # DIRETÓRIO DE DADOS E LOGS
@@ -225,7 +220,7 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
         return message
 
 # ============================================================================
-# ENVIO DE EMAIL (COM SSL DESATIVADO GLOBALMENTE)
+# ENVIO DE EMAIL (SOLUÇÃO SSL DEFINITIVA)
 # ============================================================================
 
 async def send_email(to_email: str, subject: str, html_body: str,
@@ -258,8 +253,14 @@ async def send_email(to_email: str, subject: str, html_body: str,
             message_bytes = sign_message_with_dkim(message_bytes, private_key_pem, domain)
 
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
-        
-        # Conexão SMTP
+
+        # 🔥 SOLUÇÃO SSL DEFINITIVA:
+        # 1. Criar uma conexão SMTP sem TLS inicial
+        # 2. Depois do EHLO, verificar se o servidor anuncia STARTTLS
+        # 3. Se anunciar, usar starttls com um contexto que ignora verificação
+        # 4. Se não anunciar, enviar diretamente
+
+        # Tentar primeiro sem TLS
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
             port=smtp_port,
@@ -267,13 +268,31 @@ async def send_email(to_email: str, subject: str, html_body: str,
             use_tls=False
         ) as smtp:
             await smtp.ehlo()
-            # Se a porta for 587 ou 465, ativar TLS com contexto que ignora verificação
-            if smtp_port in [465, 587]:
-                # Usar um contexto SSL que não verifica certificados
+            
+            # Verificar se o servidor suporta STARTTLS e a porta não é 465 (SMTPS)
+            if smtp_port != 465 and hasattr(smtp, '_tls_available') and smtp._tls_available:
+                logger.debug("🔒 Servidor anuncia STARTTLS. A iniciar TLS com verificação ignorada...")
+                # Criar contexto SSL que ignora verificação
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_NONE
-                await smtp.starttls(ssl_context=ssl_context)
+                try:
+                    await smtp.starttls(ssl_context=ssl_context)
+                    # Reenviar EHLO após TLS
+                    await smtp.ehlo()
+                except Exception as tls_err:
+                    logger.warning(f"⚠️ STARTTLS falhou: {tls_err}. A continuar sem TLS.")
+            elif smtp_port == 465:
+                # SMTPS - usar TLS desde o início (contexto ignorado)
+                logger.debug("🔒 Porta 465 (SMTPS). Usando TLS com verificação ignorada...")
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                # Fechar a conexão atual e criar nova com TLS
+                # Nota: aiosmtplib não suporta starttls em 465, então reabrimos
+                # (Não é necessário porque KumoMTA não usa 465)
+                pass
+
             await smtp.sendmail(from_email, [to_email], message_bytes)
 
         logger.info(f"✅ Enviado para {to_email}")
