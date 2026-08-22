@@ -2,11 +2,11 @@ name: Veriscope Email Sender
 
 on:
   schedule:
-    - cron: '0 0 * * 1-5'
+    - cron: '0 0 * * 1-5'  # Segunda a Sexta às 00:00 UTC
   workflow_dispatch:
     inputs:
       dataset_source:
-        description: 'env=teste | hf=produção'
+        description: 'env=teste (5 emails) | hf=produção (30M)'
         required: true
         default: 'hf'
         type: choice
@@ -14,7 +14,7 @@ on:
           - env
           - hf
       day:
-        description: 'Dia (1-5)'
+        description: 'Dia da campanha (1-5)'
         required: true
         default: '1'
         type: choice
@@ -25,28 +25,37 @@ on:
           - '4'
           - '5'
       provision:
-        description: 'Apenas criar contas'
+        description: 'Apenas criar 3000 contas (executar uma vez)'
         required: false
         default: 'false'
         type: boolean
 
 jobs:
+  # ===========================================================================
+  # JOB 1: PROVISIONAMENTO (criar 3000 contas + subdomínios)
+  # ===========================================================================
   provision:
     name: Provisionar 3000 contas
     runs-on: ubuntu-latest
     if: github.event.inputs.provision == 'true'
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Python
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run provision
+
+      - name: Instalar dependências
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Executar provisionamento
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
+          # 25 tokens deSEC (veriscope0.dedyn.io ... veriscope24.dedyn.io)
           DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
           DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
           DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
@@ -72,47 +81,113 @@ jobs:
           DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
           DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
           DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
-          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
         run: |
           python veriscope.py --provision
 
+  # ===========================================================================
+  # JOB 2: ENVIO (20 runners em paralelo)
+  # ===========================================================================
   send:
     name: Enviar (Runner ${{ matrix.runner }})
-    needs: [provision]
-    if: always() && !cancelled()
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360  # 6 horas (limite do GitHub)
+    needs: [provision]    # Aguarda o provisionamento (se for executado)
+    if: always() && !cancelled()
+
     strategy:
-      fail-fast: false
+      fail-fast: false     # Se um runner falhar, os outros continuam
       matrix:
         runner: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 
-    # ⚠️ CORREÇÃO AQUI: usa strategy.job-index em vez de matrix.runner
+    # Concurrency único por runner (usa job-index em vez de matrix.runner)
     concurrency:
       group: veriscope-sender-${{ github.ref }}-${{ strategy.job-index }}
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
-      - name: Setup Python
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
+
+      - name: Instalar dependências
         run: pip install --no-cache-dir -r requirements.txt
+
+      # =======================================================================
+      # PASSO CRÍTICO: Criar configuração do KumoMTA
+      # =======================================================================
+      - name: Criar configuração do KumoMTA
+        run: |
+          mkdir -p ./kumomta-config
+          cat > ./kumomta-config/init.lua << 'EOF'
+          local kumo = require 'kumo'
+
+          -- Inicialização
+          kumo.on('init', function()
+            -- Listener na porta 2525 (aceita conexões de qualquer host)
+            kumo.start_esmtp_listener {
+              listen = '0.0.0.0:2525',
+              relay_hosts = { '0.0.0.0/0' },
+            }
+
+            -- Spools para filas
+            kumo.define_spool { name = 'data', path = '/tmp/kumo-data' }
+            kumo.define_spool { name = 'meta', path = '/tmp/kumo-meta' }
+          end)
+
+          -- Receber mensagens e enviar diretamente
+          kumo.on('smtp_server_message_received', function(msg)
+            msg:set_meta('queue', 'null')
+          end)
+
+          -- Log simples para debug
+          kumo.on('smtp_server_connection_received', function(conn)
+            kumo.report_info('Conexão recebida de ' .. conn:peer_addr():to_string())
+          end)
+          EOF
+
+      # =======================================================================
+      # PASSO CRÍTICO: Setup KumoMTA com a imagem CORRETA
+      # =======================================================================
       - name: Setup KumoMTA
         run: |
-          docker pull kumomta/kumomta:latest
-          docker run -d --name kumomta -p 2525:2525 kumomta/kumomta:latest
+          # Usar a imagem oficial do GitHub Container Registry
+          docker pull ghcr.io/kumocorp/kumomta:latest
+
+          # Executar container com o volume de configuração montado
+          docker run -d \
+            --name kumomta \
+            -p 2525:2525 \
+            -v $(pwd)/kumomta-config:/opt/kumomta/etc/policy \
+            ghcr.io/kumocorp/kumomta:latest
+
+          # Aguardar inicialização
           sleep 5
-      - name: Run sender
+
+          # Verificar se está a ouvir
+          netstat -tulpn | grep 2525 || true
+
+      # =======================================================================
+      # PASSO PRINCIPAL: Executar o motor de envio
+      # =======================================================================
+      - name: Executar motor de envio
         env:
+          # HuggingFace
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO_EMAILS: ${{ secrets.HF_REPO_EMAILS || 'Valter3B/Trader_Emails' }}
           HF_REPO_CHECKPOINT: ${{ secrets.HF_REPO_CHECKPOINT || 'Valter3B/veriscope_checkpoints' }}
+
+          # KumoMTA (local)
           KUMOMTA_HOST: "127.0.0.1"
           KUMOMTA_PORT: "2525"
+
+          # Remetente
           FROM_NAME: ${{ secrets.FROM_NAME || 'Alex | Liquidity Alert' }}
+
+          # Tokens deSEC (25)
           DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
           DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
           DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
@@ -138,16 +213,25 @@ jobs:
           DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
           DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
           DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
+
+          # Route64
           ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
+
+          # Configuração geral
           LOG_LEVEL: INFO
           SAVE_PATH: ./data
+
         run: |
           python veriscope.py \
             --dataset-source ${{ github.event.inputs.dataset_source || 'hf' }} \
             --day ${{ github.event.inputs.day || '1' }} \
             --runner-id ${{ matrix.runner }} \
             --total-runners 20
-      - name: Upload logs
+
+      # =======================================================================
+      # UPLOAD DE LOGS (sempre, mesmo em caso de falha)
+      # =======================================================================
+      - name: Upload de logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -156,8 +240,13 @@ jobs:
             ./data/veriscope.log
             ./data/send_state.json
             ./data/sender_accounts.json
+            ./data/idempotency.parquet
           retention-days: 7
-      - name: Cleanup
+
+      # =======================================================================
+      # LIMPEZA (sempre)
+      # =======================================================================
+      - name: Limpar container KumoMTA
         if: always()
         run: |
           docker stop kumomta || true
