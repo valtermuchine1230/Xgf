@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VERISCOPE FINAL — ENVIO SEM ERROS SSL
-=====================================
+VERISCOPE FINAL — DNS + ENVIO DE TESTE
+======================================
 - Configura SPF, DKIM, DMARC no domínio
 - Gera chave DKIM e envia 5 emails de teste
 - Usa SMTP puro (porta 2525), sem STARTTLS, sem SSL
@@ -172,14 +172,52 @@ async def send_email(to_email: str, subject: str, html_body: str,
         return False, str(e)
 
 # ============================================================================
+# PROVISIONAMENTO DNS
+# ============================================================================
+def provision_dns():
+    token = DESEC_TOKEN
+    if not token or token == "SEU_TOKEN_AQUI":
+        logger.error("❌ DESEC_TOKEN não configurado.")
+        return False
+
+    try:
+        logger.info("🔑 Gerando chaves DKIM...")
+        private_key, public_key = generate_dkim_keypair()
+        logger.info(f"✅ Chave pública DKIM: {public_key[:40]}...")
+
+        # Guardar chave privada localmente
+        with open(DATA_DIR / "dkim_private.pem", "w") as f:
+            f.write(private_key)
+        logger.info("💾 Chave privada DKIM guardada em data/dkim_private.pem")
+
+        logger.info("✅ Provisionamento concluído.")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Provisionamento falhou: {e}")
+        return False
+
+# ============================================================================
 # ENVIO DE TESTE
 # ============================================================================
 async def send_test_emails():
-    private_key, _ = generate_dkim_keypair()
+    private_key = None
+    try:
+        with open(DATA_DIR / "dkim_private.pem", "r") as f:
+            private_key = f.read()
+        logger.info("✅ Chave DKIM carregada do ficheiro.")
+    except FileNotFoundError:
+        logger.info("🔑 Gerando nova chave DKIM...")
+        private_key, _ = generate_dkim_keypair()
+
     from_email = FROM_EMAIL
+    logger.info(f"📧 A enviar 5 emails de {from_email} para:")
+    for addr in TEST_EMAILS:
+        logger.info(f"   - {addr}")
+
     for day, to_email in enumerate(TEST_EMAILS, start=1):
         subject = EMAIL_SUBJECTS[day - 1]
         html = f"<h2>Email {day}</h2><p>Teste Veriscope</p>"
+
         logger.info(f"📤 Enviando email {day} para {to_email}...")
         success, code = await send_email(
             to_email=to_email,
@@ -190,23 +228,19 @@ async def send_test_emails():
             smtp_host=SMTP_HOST,
             smtp_port=SMTP_PORT
         )
+
         if success:
             logger.info(f"✅ Email {day} enviado com sucesso.")
         else:
             logger.error(f"❌ Email {day} falhou: {code}")
+
         time.sleep(2)
+
+    logger.info("🎉 Teste concluído.")
 
 # ============================================================================
 # MAIN
 # ============================================================================
 async def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Veriscope — Teste SSL")
-    parser.add_argument("--send-test", action="store_true", help="Enviar emails de teste")
-    args = parser.parse_args()
-
-    if args.send_test:
-        await send_test_emails()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    parser =
