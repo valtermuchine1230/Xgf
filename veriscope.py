@@ -7,7 +7,7 @@ VERISCOPE FINAL — PROVISIONAMENTO + TESTE REAL
 - Gera chave DKIM e envia 5 emails de teste
 - Tratamento automático de rate limiting (429) com backoff
 - Formato correto para registos TXT (com aspas)
-- Suporte a SMTP via KumoMTA (ou outro)
+- DESATIVA VERIFICAÇÃO SSL PARA TESTES (certificados autoassinados)
 
 Uso:
   python veriscope.py --provision    # só configura DNS
@@ -28,6 +28,11 @@ import ssl
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Tuple
+
+# ============================================================================
+# 🔥 DESATIVAR VERIFICAÇÃO SSL PARA TESTES (KUMOMTA USA CERTIFICADO SELF-SIGNED)
+# ============================================================================
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # ============================================================================
 # DIRETÓRIO DE DADOS E LOGS
@@ -220,7 +225,7 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
         return message
 
 # ============================================================================
-# ENVIO DE EMAIL (SEM ARGUMENTO SSL_CONTEXT PARA COMPATIBILIDADE)
+# ENVIO DE EMAIL (COM SSL DESATIVADO GLOBALMENTE)
 # ============================================================================
 
 async def send_email(to_email: str, subject: str, html_body: str,
@@ -252,10 +257,9 @@ async def send_email(to_email: str, subject: str, html_body: str,
             domain = from_email.split('@')[1]
             message_bytes = sign_message_with_dkim(message_bytes, private_key_pem, domain)
 
-        # Para KumoMTA (porta 2525) não usa TLS; para outros SMTP, usa starttls se necessário
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
         
-        # Versão antiga do aiosmtplib não suporta ssl_context, então usamos use_tls
+        # Conexão SMTP
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
             port=smtp_port,
@@ -263,9 +267,13 @@ async def send_email(to_email: str, subject: str, html_body: str,
             use_tls=False
         ) as smtp:
             await smtp.ehlo()
-            # Se a porta for 587 ou 465, ativar TLS
+            # Se a porta for 587 ou 465, ativar TLS com contexto que ignora verificação
             if smtp_port in [465, 587]:
-                await smtp.starttls()
+                # Usar um contexto SSL que não verifica certificados
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                await smtp.starttls(ssl_context=ssl_context)
             await smtp.sendmail(from_email, [to_email], message_bytes)
 
         logger.info(f"✅ Enviado para {to_email}")
