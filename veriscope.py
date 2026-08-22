@@ -7,8 +7,7 @@ VERISCOPE FINAL — PROVISIONAMENTO + TESTE REAL
 - Gera chave DKIM e envia 5 emails de teste
 - Tratamento automático de rate limiting (429) com backoff
 - Formato correto para registos TXT (com aspas)
-- Suporte a SMTP via KumoMTA (ou outro) com SSL ignorado para testes
-- Cria diretório de dados e logs
+- Suporte a SMTP via KumoMTA (ou outro)
 
 Uso:
   python veriscope.py --provision    # só configura DNS
@@ -221,7 +220,7 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
         return message
 
 # ============================================================================
-# ENVIO DE EMAIL (COM SSL IGNORADO PARA TESTES)
+# ENVIO DE EMAIL (SEM ARGUMENTO SSL_CONTEXT PARA COMPATIBILIDADE)
 # ============================================================================
 
 async def send_email(to_email: str, subject: str, html_body: str,
@@ -253,20 +252,20 @@ async def send_email(to_email: str, subject: str, html_body: str,
             domain = from_email.split('@')[1]
             message_bytes = sign_message_with_dkim(message_bytes, private_key_pem, domain)
 
-        # Criar contexto SSL que ignora verificação (apenas para testes)
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-
+        # Para KumoMTA (porta 2525) não usa TLS; para outros SMTP, usa starttls se necessário
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
+        
+        # Versão antiga do aiosmtplib não suporta ssl_context, então usamos use_tls
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
             port=smtp_port,
             timeout=30,
-            use_tls=False,  # KumoMTA não usa TLS por defeito na porta 2525
-            ssl_context=ssl_context
+            use_tls=False
         ) as smtp:
             await smtp.ehlo()
+            # Se a porta for 587 ou 465, ativar TLS
+            if smtp_port in [465, 587]:
+                await smtp.starttls()
             await smtp.sendmail(from_email, [to_email], message_bytes)
 
         logger.info(f"✅ Enviado para {to_email}")
@@ -356,7 +355,7 @@ def build_full_html(day: int) -> str:
     """
 
 # ============================================================================
-# PROVISIONAMENTO
+# PROVISIONAMENTO DNS
 # ============================================================================
 
 def provision_dns():
@@ -389,6 +388,11 @@ def provision_dns():
     if not add_txt_record(MAIN_DOMAIN, dmarc_sub, dmarc_value, token):
         logger.warning("⚠️ DMARC falhou, mas continuando...")
 
+    # Guardar chave privada localmente para o envio
+    with open(DATA_DIR / "dkim_private.pem", "w") as f:
+        f.write(private_key)
+    logger.info("💾 Chave privada DKIM guardada em data/dkim_private.pem")
+
     logger.info("✅ Provisionamento concluído.")
     return True
 
@@ -397,8 +401,15 @@ def provision_dns():
 # ============================================================================
 
 async def send_test_emails():
-    logger.info("🔑 Gerando chave DKIM para assinatura...")
-    private_key, _ = generate_dkim_keypair()
+    # Tentar carregar chave privada do ficheiro, senão gerar nova
+    private_key = None
+    try:
+        with open(DATA_DIR / "dkim_private.pem", "r") as f:
+            private_key = f.read()
+        logger.info("✅ Chave DKIM carregada do ficheiro.")
+    except FileNotFoundError:
+        logger.info("🔑 Gerando nova chave DKIM...")
+        private_key, _ = generate_dkim_keypair()
 
     from_email = FROM_EMAIL
     logger.info(f"📧 A enviar 5 emails de {from_email} para:")
