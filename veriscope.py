@@ -7,7 +7,7 @@ VERISCOPE FINAL — PROVISIONAMENTO + TESTE REAL
 - Gera chave DKIM e envia 5 emails de teste
 - Tratamento automático de rate limiting (429) com backoff
 - Formato correto para registos TXT (com aspas)
-- SOLUÇÃO SSL DEFINITIVA: usa starttls com contexto que ignora verificação
+- SOLUÇÃO SSL DEFINITIVA: NUNCA USA STARTTLS (SMTP puro na porta 2525)
 
 Uso:
   python veriscope.py --provision    # só configura DNS
@@ -220,7 +220,7 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
         return message
 
 # ============================================================================
-# ENVIO DE EMAIL (SOLUÇÃO SSL DEFINITIVA)
+# ENVIO DE EMAIL (SMTP PURO — SEM STARTTLS, SEM SSL)
 # ============================================================================
 
 async def send_email(to_email: str, subject: str, html_body: str,
@@ -254,45 +254,20 @@ async def send_email(to_email: str, subject: str, html_body: str,
 
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
 
-        # 🔥 SOLUÇÃO SSL DEFINITIVA:
-        # 1. Criar uma conexão SMTP sem TLS inicial
-        # 2. Depois do EHLO, verificar se o servidor anuncia STARTTLS
-        # 3. Se anunciar, usar starttls com um contexto que ignora verificação
-        # 4. Se não anunciar, enviar diretamente
-
-        # Tentar primeiro sem TLS
+        # 🔥 SOLUÇÃO DEFINITIVA: 
+        # Usar SMTP puro, SEM STARTTLS, SEM SSL.
+        # O KumoMTA na porta 2525 aceita conexões não-TLS.
+        # Isto evita completamente qualquer erro de certificado.
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
             port=smtp_port,
             timeout=30,
-            use_tls=False
+            use_tls=False          # Não usa TLS
         ) as smtp:
+            # NÃO chamamos starttls() — evitamos totalmente SSL
             await smtp.ehlo()
-            
-            # Verificar se o servidor suporta STARTTLS e a porta não é 465 (SMTPS)
-            if smtp_port != 465 and hasattr(smtp, '_tls_available') and smtp._tls_available:
-                logger.debug("🔒 Servidor anuncia STARTTLS. A iniciar TLS com verificação ignorada...")
-                # Criar contexto SSL que ignora verificação
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                try:
-                    await smtp.starttls(ssl_context=ssl_context)
-                    # Reenviar EHLO após TLS
-                    await smtp.ehlo()
-                except Exception as tls_err:
-                    logger.warning(f"⚠️ STARTTLS falhou: {tls_err}. A continuar sem TLS.")
-            elif smtp_port == 465:
-                # SMTPS - usar TLS desde o início (contexto ignorado)
-                logger.debug("🔒 Porta 465 (SMTPS). Usando TLS com verificação ignorada...")
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                # Fechar a conexão atual e criar nova com TLS
-                # Nota: aiosmtplib não suporta starttls em 465, então reabrimos
-                # (Não é necessário porque KumoMTA não usa 465)
-                pass
-
+            # Se o servidor anunciar STARTTLS, ignoramos
+            # (não chamamos starttls, nunca negociamos TLS)
             await smtp.sendmail(from_email, [to_email], message_bytes)
 
         logger.info(f"✅ Enviado para {to_email}")
