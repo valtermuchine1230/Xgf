@@ -7,12 +7,13 @@ VERISCOPE FINAL — PROVISIONAMENTO + TESTE REAL
 - Gera chave DKIM e envia 5 emails de teste
 - Tratamento automático de rate limiting (429) com backoff
 - Formato correto para registos TXT (com aspas)
-- Suporte a SMTP via KumoMTA (ou outro)
+- Suporte a SMTP via KumoMTA (ou outro) com SSL ignorado para testes
+- Cria diretório de dados e logs
 
 Uso:
-  python veriscope_final.py --provision    # só configura DNS
-  python veriscope_final.py --send-test    # envia os 5 emails
-  python veriscope_final.py --all          # faz tudo
+  python veriscope.py --provision    # só configura DNS
+  python veriscope.py --send-test    # envia os 5 emails
+  python veriscope.py --all          # faz tudo
 """
 
 import os
@@ -24,10 +25,20 @@ import logging
 import hashlib
 import base64
 import requests
+import ssl
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Tuple
 
-# Dependências opcionais
+# ============================================================================
+# DIRETÓRIO DE DADOS E LOGS
+# ============================================================================
+DATA_DIR = Path("./data")
+DATA_DIR.mkdir(exist_ok=True)
+
+# ============================================================================
+# DEPENDÊNCIAS OPCIONAIS
+# ============================================================================
 try:
     import aiosmtplib
     from email.mime.text import MIMEText
@@ -35,12 +46,14 @@ try:
     HAS_SMTP = True
 except ImportError:
     HAS_SMTP = False
+    print("⚠️ aiosmtplib não instalado. Execute: pip install aiosmtplib")
 
 try:
     import dkim
     HAS_DKIM = True
 except ImportError:
     HAS_DKIM = False
+    print("⚠️ dkimpy não instalado. Execute: pip install dkimpy")
 
 try:
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -49,17 +62,33 @@ try:
     HAS_CRYPTO = True
 except ImportError:
     HAS_CRYPTO = False
+    print("⚠️ cryptography não instalado. Execute: pip install cryptography")
 
 try:
     from email_validator import validate_email, EmailNotValidError
     HAS_VALIDATOR = True
 except ImportError:
     HAS_VALIDATOR = False
+    print("⚠️ email-validator não instalado. Execute: pip install email-validator")
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+LOG_FILE = DATA_DIR / "veriscope.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s │ %(levelname)-8s │ %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, encoding="utf-8")
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # CONFIGURAÇÃO
 # ============================================================================
-
 DESEC_TOKEN = os.getenv("DESEC_TOKEN_1", "SEU_TOKEN_AQUI")
 MAIN_DOMAIN = "veriscope0.dedyn.io"
 SUB_NAME = "sub0"
@@ -67,10 +96,11 @@ FROM_EMAIL = f"alex@{SUB_NAME}.{MAIN_DOMAIN}"
 
 IPV6 = os.getenv("TEST_IPV6", "2a11:6c7:f10:5::1")
 
-# SMTP — usar KumoMTA ou outro
+# SMTP
 SMTP_HOST = os.getenv("KUMOMTA_HOST", "127.0.0.1")
 SMTP_PORT = int(os.getenv("KUMOMTA_PORT", "2525"))
 
+# Emails de teste
 TEST_EMAILS = [
     "macuacuavalter71@gmail.com",
     "stanl-eyb-75@aliasvault.net",
@@ -89,22 +119,10 @@ EMAIL_SUBJECTS = [
 ]
 
 # ============================================================================
-# LOGGING
-# ============================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s │ %(levelname)-8s │ %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger(__name__)
-
-# ============================================================================
 # FUNÇÕES DA API DESEC (COM RETRY PARA RATE LIMIT)
 # ============================================================================
 
 def call_desec_api(method: str, endpoint: str, token: str, data: dict = None, retries: int = 5) -> dict:
-    """Faz chamada à API deSEC com retry automático para 429."""
     url = f"https://desec.io/api/v1/{endpoint}"
     headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
     
@@ -128,7 +146,7 @@ def call_desec_api(method: str, endpoint: str, token: str, data: dict = None, re
             if attempt == retries:
                 raise
             logger.warning(f"⚠️ Erro na tentativa {attempt}: {e}. A repetir...")
-            time.sleep(2 ** attempt)  # backoff exponencial
+            time.sleep(2 ** attempt)
 
 def ensure_domain_exists(domain: str, token: str) -> bool:
     try:
@@ -145,11 +163,6 @@ def ensure_domain_exists(domain: str, token: str) -> bool:
             return False
 
 def add_txt_record(domain: str, subname: str, value: str, token: str, ttl: int = 3600) -> bool:
-    """
-    Adiciona um registo TXT no formato correto (com aspas).
-    Exemplo: value = "v=spf1 ip6:... -all"  →  o API espera ["\"v=spf1 ...\""]
-    """
-    # A API deSEC exige que cada registo seja uma string com aspas duplas internas
     quoted = f'"{value}"'
     data = [{
         "subname": subname,
@@ -208,7 +221,7 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
         return message
 
 # ============================================================================
-# ENVIO DE EMAIL
+# ENVIO DE EMAIL (COM SSL IGNORADO PARA TESTES)
 # ============================================================================
 
 async def send_email(to_email: str, subject: str, html_body: str,
@@ -240,13 +253,18 @@ async def send_email(to_email: str, subject: str, html_body: str,
             domain = from_email.split('@')[1]
             message_bytes = sign_message_with_dkim(message_bytes, private_key_pem, domain)
 
-        # Tentar ligar ao SMTP
+        # Criar contexto SSL que ignora verificação (apenas para testes)
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
             port=smtp_port,
             timeout=30,
-            use_tls=False  # KumoMTA geralmente não usa TLS na porta 2525
+            use_tls=False,  # KumoMTA não usa TLS por defeito na porta 2525
+            ssl_context=ssl_context
         ) as smtp:
             await smtp.ehlo()
             await smtp.sendmail(from_email, [to_email], message_bytes)
@@ -342,35 +360,29 @@ def build_full_html(day: int) -> str:
 # ============================================================================
 
 def provision_dns():
-    """Configura SPF, DKIM, DMARC no DNS."""
     token = DESEC_TOKEN
     if not token or token == "SEU_TOKEN_AQUI":
         logger.error("❌ DESEC_TOKEN não configurado.")
         return False
 
-    # 1. Garantir domínio principal
     if not ensure_domain_exists(MAIN_DOMAIN, token):
         return False
 
-    # 2. Gerar chave DKIM
     logger.info("🔑 Gerando chaves DKIM...")
     private_key, public_key = generate_dkim_keypair()
     logger.info(f"✅ Chave pública: {public_key[:40]}...")
 
-    # 3. SPF
     logger.info("🔧 Configurando SPF...")
     spf_value = f"v=spf1 ip6:{IPV6}/128 -all"
     if not add_txt_record(MAIN_DOMAIN, SUB_NAME, spf_value, token):
         logger.warning("⚠️ SPF falhou, mas continuando...")
 
-    # 4. DKIM
     logger.info("🔧 Publicando DKIM...")
     dkim_sub = f"s2026._domainkey.{SUB_NAME}"
     dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
     if not add_txt_record(MAIN_DOMAIN, dkim_sub, dkim_value, token):
         logger.warning("⚠️ DKIM falhou, mas continuando...")
 
-    # 5. DMARC
     logger.info("🔧 Configurando DMARC...")
     dmarc_sub = f"_dmarc.{SUB_NAME}"
     dmarc_value = f"v=DMARC1; p=quarantine; pct=100; adkim=r; aspf=r; rua=mailto:dmarc@{SUB_NAME}.{MAIN_DOMAIN}"
@@ -385,8 +397,6 @@ def provision_dns():
 # ============================================================================
 
 async def send_test_emails():
-    """Envia 5 emails de teste."""
-    # Regenerar chave DKIM (ou carregar de ficheiro)
     logger.info("🔑 Gerando chave DKIM para assinatura...")
     private_key, _ = generate_dkim_keypair()
 
@@ -415,7 +425,7 @@ async def send_test_emails():
         else:
             logger.error(f"❌ Email {day} falhou: {code}")
 
-        time.sleep(2)  # pausa entre emails
+        time.sleep(2)
 
     logger.info("🎉 Teste concluído.")
 
