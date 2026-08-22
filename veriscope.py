@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VERISCOPE REAL TEST — 1 CONTA REAL (SEM CRIAR DOMÍNIOS ADICIONAIS)
-===================================================================
-- Usa o domínio principal veriscope0.dedyn.io (já existe)
-- Adiciona registos SPF, DKIM, DMARC para sub0.veriscope0.dedyn.io
-- Gera chave DKIM e assina emails
-- Envia 5 emails de teste
+VERISCOPE FINAL — PROVISIONAMENTO + TESTE REAL
+================================================
+- Configura SPF, DKIM, DMARC no domínio veriscope0.dedyn.io
+- Gera chave DKIM e envia 5 emails de teste
+- Tratamento automático de rate limiting (429) com backoff
+- Formato correto para registos TXT (com aspas)
+- Suporte a SMTP via KumoMTA (ou outro)
 
-Uso: python veriscope_real.py
+Uso:
+  python veriscope_final.py --provision    # só configura DNS
+  python veriscope_final.py --send-test    # envia os 5 emails
+  python veriscope_final.py --all          # faz tudo
 """
 
 import os
@@ -22,26 +26,21 @@ import base64
 import requests
 from datetime import datetime, timezone
 from typing import Tuple
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
-# ============================================================================
-# VERIFICAÇÃO DE DEPENDÊNCIAS
-# ============================================================================
-
+# Dependências opcionais
 try:
     import aiosmtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
     HAS_SMTP = True
 except ImportError:
     HAS_SMTP = False
-    print("⚠️  aiosmtplib não instalado. Execute: pip install aiosmtplib")
 
 try:
     import dkim
     HAS_DKIM = True
 except ImportError:
     HAS_DKIM = False
-    print("⚠️  dkimpy não instalado. Execute: pip install dkimpy")
 
 try:
     from cryptography.hazmat.primitives.asymmetric import rsa
@@ -50,14 +49,12 @@ try:
     HAS_CRYPTO = True
 except ImportError:
     HAS_CRYPTO = False
-    print("⚠️  cryptography não instalado. Execute: pip install cryptography")
 
 try:
     from email_validator import validate_email, EmailNotValidError
     HAS_VALIDATOR = True
 except ImportError:
     HAS_VALIDATOR = False
-    print("⚠️  email-validator não instalado. Execute: pip install email-validator")
 
 # ============================================================================
 # CONFIGURAÇÃO
@@ -66,9 +63,11 @@ except ImportError:
 DESEC_TOKEN = os.getenv("DESEC_TOKEN_1", "SEU_TOKEN_AQUI")
 MAIN_DOMAIN = "veriscope0.dedyn.io"
 SUB_NAME = "sub0"
-FULL_EMAIL_DOMAIN = f"{SUB_NAME}.{MAIN_DOMAIN}"
+FROM_EMAIL = f"alex@{SUB_NAME}.{MAIN_DOMAIN}"
 
 IPV6 = os.getenv("TEST_IPV6", "2a11:6c7:f10:5::1")
+
+# SMTP — usar KumoMTA ou outro
 SMTP_HOST = os.getenv("KUMOMTA_HOST", "127.0.0.1")
 SMTP_PORT = int(os.getenv("KUMOMTA_PORT", "2525"))
 
@@ -101,20 +100,37 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# FUNÇÕES DA API deSEC (REAIS)
+# FUNÇÕES DA API DESEC (COM RETRY PARA RATE LIMIT)
 # ============================================================================
 
-def call_desec_api(method: str, endpoint: str, token: str, data: dict = None) -> dict:
+def call_desec_api(method: str, endpoint: str, token: str, data: dict = None, retries: int = 5) -> dict:
+    """Faz chamada à API deSEC com retry automático para 429."""
     url = f"https://desec.io/api/v1/{endpoint}"
     headers = {"Authorization": f"Token {token}", "Content-Type": "application/json"}
-    logger.info(f"🌐 {method} {url}")
-    response = requests.request(method, url, json=data, headers=headers, timeout=15)
-    if response.status_code not in [200, 201, 204]:
-        raise Exception(f"deSEC API error {response.status_code}: {response.text[:200]}")
-    return response.json() if response.text else {}
+    
+    for attempt in range(1, retries + 1):
+        try:
+            logger.info(f"🌐 {method} {url} (tentativa {attempt})")
+            response = requests.request(method, url, json=data, headers=headers, timeout=15)
+            
+            if response.status_code == 429:
+                wait = int(response.headers.get("Retry-After", 2))
+                logger.warning(f"⏳ Rate limit (429). Aguardando {wait}s...")
+                time.sleep(wait)
+                continue
+                
+            if response.status_code not in [200, 201, 204]:
+                raise Exception(f"deSEC API error {response.status_code}: {response.text[:200]}")
+                
+            return response.json() if response.text else {}
+            
+        except Exception as e:
+            if attempt == retries:
+                raise
+            logger.warning(f"⚠️ Erro na tentativa {attempt}: {e}. A repetir...")
+            time.sleep(2 ** attempt)  # backoff exponencial
 
 def ensure_domain_exists(domain: str, token: str) -> bool:
-    """Cria o domínio principal se não existir."""
     try:
         call_desec_api("GET", f"domains/{domain}/", token)
         logger.info(f"ℹ️ Domínio {domain} já existe.")
@@ -122,29 +138,31 @@ def ensure_domain_exists(domain: str, token: str) -> bool:
     except:
         try:
             call_desec_api("POST", "domains/", token, {"name": domain})
-            logger.info(f"✅ Domínio {domain} criado com sucesso.")
+            logger.info(f"✅ Domínio {domain} criado.")
             return True
         except Exception as e:
-            logger.error(f"❌ Falha ao criar domínio {domain}: {e}")
+            logger.error(f"❌ Falha ao criar domínio: {e}")
             return False
 
-def add_rrset(domain: str, subname: str, rtype: str, records: list, token: str, ttl: int = 3600) -> bool:
+def add_txt_record(domain: str, subname: str, value: str, token: str, ttl: int = 3600) -> bool:
     """
-    Adiciona ou atualiza um conjunto de registos DNS para um subdomínio.
-    Exemplo: subname="sub0", rtype="TXT", records=["v=spf1 ..."]
+    Adiciona um registo TXT no formato correto (com aspas).
+    Exemplo: value = "v=spf1 ip6:... -all"  →  o API espera ["\"v=spf1 ...\""]
     """
+    # A API deSEC exige que cada registo seja uma string com aspas duplas internas
+    quoted = f'"{value}"'
+    data = [{
+        "subname": subname,
+        "type": "TXT",
+        "ttl": ttl,
+        "records": [quoted]
+    }]
     try:
-        data = [{
-            "subname": subname,
-            "type": rtype,
-            "ttl": ttl,
-            "records": records
-        }]
         call_desec_api("PUT", f"domains/{domain}/rrsets/", token, data)
-        logger.info(f"✅ {rtype} para {subname}.{domain} configurado.")
+        logger.info(f"✅ TXT {subname} configurado.")
         return True
     except Exception as e:
-        logger.error(f"❌ Falha ao configurar {rtype} para {subname}: {e}")
+        logger.error(f"❌ Falha TXT {subname}: {e}")
         return False
 
 # ============================================================================
@@ -186,7 +204,7 @@ def sign_message_with_dkim(message: bytes, private_key_pem: str, domain: str, se
             include_headers=(b'From', b'To', b'Subject', b'Date', b'Message-ID'),
         )
     except Exception as e:
-        logger.error(f"❌ Erro ao assinar DKIM: {e}")
+        logger.error(f"❌ Erro DKIM: {e}")
         return message
 
 # ============================================================================
@@ -222,20 +240,21 @@ async def send_email(to_email: str, subject: str, html_body: str,
             domain = from_email.split('@')[1]
             message_bytes = sign_message_with_dkim(message_bytes, private_key_pem, domain)
 
+        # Tentar ligar ao SMTP
         formatted_host = f"[{smtp_host}]" if ':' in smtp_host else smtp_host
         async with aiosmtplib.SMTP(
             hostname=formatted_host,
             port=smtp_port,
             timeout=30,
-            use_tls=False
+            use_tls=False  # KumoMTA geralmente não usa TLS na porta 2525
         ) as smtp:
             await smtp.ehlo()
             await smtp.sendmail(from_email, [to_email], message_bytes)
 
-        logger.info(f"✅ Email enviado para {to_email}")
+        logger.info(f"✅ Enviado para {to_email}")
         return True, "250 OK"
     except Exception as e:
-        logger.error(f"❌ Erro ao enviar para {to_email}: {e}")
+        logger.error(f"❌ Falha ao enviar para {to_email}: {e}")
         return False, str(e)
 
 # ============================================================================
@@ -249,9 +268,7 @@ def get_email_html(day: int) -> str:
         <p>Se já estás há alguns anos no trading, provavelmente já viste isto acontecer:</p>
         <p>Um trader perde uma operação e a primeira pergunta que faz é:</p>
         <p><strong>"O que está a faltar no meu gráfico?"</strong></p>
-        <p>Depois adiciona mais uma confirmação. Mais um indicador. Mais uma linha.</p>
         <p><strong>E se o problema não for falta de informação?</strong></p>
-        <p>Nós começámos a pensar nisso há algum tempo.</p>
         <p><a href="https://veriscope-com-session-matrix.pages.dev/" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;">Ver a ideia</a></p>
         """
     elif day == 2:
@@ -259,8 +276,6 @@ def get_email_html(day: int) -> str:
         <h2>A pergunta que levou ao Session Matrix</h2>
         <p>Ontem falei-te de uma pergunta:</p>
         <p><strong>E se o problema não for falta de informação?</strong></p>
-        <p>Essa pergunta levou-nos a olhar para o trading de outra forma.</p>
-        <p>Muitos traders passam horas à frente do gráfico. Esperam. Analisam.</p>
         <p>Foi daí que nasceu o <strong>Veriscope Session Matrix</strong>.</p>
         <p><a href="https://veriscope-com-session-matrix.pages.dev/" style="background:#2563eb;color:#fff;padding:12px 24px;text-decoration:none;border-radius:6px;">Ver o Session Matrix</a></p>
         """
@@ -323,47 +338,59 @@ def build_full_html(day: int) -> str:
     """
 
 # ============================================================================
-# MAIN
+# PROVISIONAMENTO
 # ============================================================================
 
-async def main():
-    logger.info("🚀 ===== VERISCOPE REAL TEST (SEM CRIAR SUBDOMÍNIOS) =====")
-
+def provision_dns():
+    """Configura SPF, DKIM, DMARC no DNS."""
     token = DESEC_TOKEN
     if not token or token == "SEU_TOKEN_AQUI":
-        logger.error("❌ DESEC_TOKEN não configurado. Define a variável de ambiente DESEC_TOKEN_1.")
-        sys.exit(1)
+        logger.error("❌ DESEC_TOKEN não configurado.")
+        return False
 
-    # 1. Garantir que o domínio principal existe
+    # 1. Garantir domínio principal
     if not ensure_domain_exists(MAIN_DOMAIN, token):
-        logger.error("❌ Falha ao criar/verificar domínio principal.")
-        sys.exit(1)
+        return False
 
     # 2. Gerar chave DKIM
     logger.info("🔑 Gerando chaves DKIM...")
-    private_key, public_key_b64 = generate_dkim_keypair()
-    logger.info(f"✅ Chave pública: {public_key_b64[:40]}...")
+    private_key, public_key = generate_dkim_keypair()
+    logger.info(f"✅ Chave pública: {public_key[:40]}...")
 
-    # 3. Configurar SPF para sub0.veriscope0.dedyn.io
+    # 3. SPF
     logger.info("🔧 Configurando SPF...")
-    if not add_rrset(MAIN_DOMAIN, SUB_NAME, "TXT", [f"v=spf1 ip6:{IPV6}/128 -all"], token):
+    spf_value = f"v=spf1 ip6:{IPV6}/128 -all"
+    if not add_txt_record(MAIN_DOMAIN, SUB_NAME, spf_value, token):
         logger.warning("⚠️ SPF falhou, mas continuando...")
 
-    # 4. Publicar DKIM (s2026._domainkey.sub0)
+    # 4. DKIM
     logger.info("🔧 Publicando DKIM...")
-    dkim_subname = f"s2026._domainkey.{SUB_NAME}"
-    if not add_rrset(MAIN_DOMAIN, dkim_subname, "TXT", [f"v=DKIM1; k=rsa; p={public_key_b64}"], token):
+    dkim_sub = f"s2026._domainkey.{SUB_NAME}"
+    dkim_value = f"v=DKIM1; k=rsa; p={public_key}"
+    if not add_txt_record(MAIN_DOMAIN, dkim_sub, dkim_value, token):
         logger.warning("⚠️ DKIM falhou, mas continuando...")
 
-    # 5. Configurar DMARC (_dmarc.sub0)
+    # 5. DMARC
     logger.info("🔧 Configurando DMARC...")
-    dmarc_subname = f"_dmarc.{SUB_NAME}"
-    dmarc_record = f"v=DMARC1; p=quarantine; pct=100; adkim=r; aspf=r; rua=mailto:dmarc@{FULL_EMAIL_DOMAIN}"
-    if not add_rrset(MAIN_DOMAIN, dmarc_subname, "TXT", [dmarc_record], token):
+    dmarc_sub = f"_dmarc.{SUB_NAME}"
+    dmarc_value = f"v=DMARC1; p=quarantine; pct=100; adkim=r; aspf=r; rua=mailto:dmarc@{SUB_NAME}.{MAIN_DOMAIN}"
+    if not add_txt_record(MAIN_DOMAIN, dmarc_sub, dmarc_value, token):
         logger.warning("⚠️ DMARC falhou, mas continuando...")
 
-    # 6. Enviar emails
-    from_email = f"alex@{FULL_EMAIL_DOMAIN}"
+    logger.info("✅ Provisionamento concluído.")
+    return True
+
+# ============================================================================
+# ENVIO DE TESTE
+# ============================================================================
+
+async def send_test_emails():
+    """Envia 5 emails de teste."""
+    # Regenerar chave DKIM (ou carregar de ficheiro)
+    logger.info("🔑 Gerando chave DKIM para assinatura...")
+    private_key, _ = generate_dkim_keypair()
+
+    from_email = FROM_EMAIL
     logger.info(f"📧 A enviar 5 emails de {from_email} para:")
     for addr in TEST_EMAILS:
         logger.info(f"   - {addr}")
@@ -388,9 +415,36 @@ async def main():
         else:
             logger.error(f"❌ Email {day} falhou: {code}")
 
-        time.sleep(2)
+        time.sleep(2)  # pausa entre emails
 
-    logger.info("🎉 ===== TESTE CONCLUÍDO =====")
+    logger.info("🎉 Teste concluído.")
+
+# ============================================================================
+# MAIN
+# ============================================================================
+
+async def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Veriscope Final — DNS + Teste")
+    parser.add_argument("--provision", action="store_true", help="Apenas configurar DNS")
+    parser.add_argument("--send-test", action="store_true", help="Apenas enviar emails")
+    parser.add_argument("--all", action="store_true", help="Faz tudo (provision + send-test)")
+    args = parser.parse_args()
+
+    if not any([args.provision, args.send_test, args.all]):
+        parser.print_help()
+        return
+
+    if args.provision or args.all:
+        logger.info("🚀 A executar provisionamento DNS...")
+        if not provision_dns():
+            logger.error("❌ Provisionamento falhou.")
+            if not args.all:
+                return
+
+    if args.send_test or args.all:
+        logger.info("🚀 A enviar emails de teste...")
+        await send_test_emails()
 
 if __name__ == "__main__":
     asyncio.run(main())
