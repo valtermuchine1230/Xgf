@@ -1,19 +1,20 @@
-name: Veriscope Email Campaign Sender
+name: Veriscope Email Sender
 
 on:
+  schedule:
+    - cron: '0 0 * * 1-5'
   workflow_dispatch:
     inputs:
       dataset_source:
-        description: 'Data source (env=test, hf=production)'
+        description: 'env=teste | hf=produção'
         required: true
         default: 'hf'
         type: choice
         options:
           - env
           - hf
-      
       day:
-        description: 'Campaign day (1-5)'
+        description: 'Dia (1-5)'
         required: true
         default: '1'
         type: choice
@@ -23,47 +24,33 @@ on:
           - '3'
           - '4'
           - '5'
-  
-  schedule:
-    - cron: '0 0 * * 1-5'  # Monday-Friday at 00:00 UTC
+      provision:
+        description: 'Apenas criar contas'
+        required: false
+        default: 'false'
+        type: boolean
+
+concurrency:
+  group: veriscope-sender-${{ github.ref }}-${{ matrix.runner }}
+  cancel-in-progress: false
 
 jobs:
-  send-parallel:
+  provision:
+    name: Provisionar 3000 contas
     runs-on: ubuntu-latest
-    concurrency:
-      group: 'veriscope-campaign-${{ github.ref }}'
-      cancel-in-progress: false
-    
-    strategy:
-      matrix:
-        runner: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-    
-    timeout-minutes: 1440
-    
+    if: github.event.inputs.provision == 'true'
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
       - name: Install dependencies
-        run: |
-          pip install --no-cache-dir -r requirements.txt
-      
-      - name: Run sender engine
+        run: pip install -r requirements.txt
+      - name: Run provision
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ secrets.HF_REPO }}
-          DESEC_DOMAIN: ${{ secrets.DESEC_DOMAIN }}
-          KUMOMTA_HOST: ${{ secrets.KUMOMTA_HOST }}
-          KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
-          KUMOMTA_FROM_NAME: ${{ secrets.KUMOMTA_FROM_NAME }}
-          TEST_EMAIL_GMAIL: ${{ secrets.TEST_EMAIL_GMAIL }}
-          TEST_EMAIL_OUTLOOK: ${{ secrets.TEST_EMAIL_OUTLOOK }}
-          TEST_EMAIL_PROTONMAIL: ${{ secrets.TEST_EMAIL_PROTONMAIL }}
-          TEST_EMAIL_HOTMAIL: ${{ secrets.TEST_EMAIL_HOTMAIL }}
           DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
           DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
           DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
@@ -89,20 +76,88 @@ jobs:
           DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
           DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
           DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
-          DESEC_TOKEN_26: ${{ secrets.DESEC_TOKEN_26 }}
-        
+          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
         run: |
-          python veriscope_main.py \
+          python veriscope.py --provision
+
+  send:
+    name: Enviar (Runner ${{ matrix.runner }})
+    needs: [provision]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install --no-cache-dir -r requirements.txt
+      - name: Setup KumoMTA
+        run: |
+          docker pull kumomta/kumomta:latest
+          docker run -d --name kumomta -p 2525:2525 kumomta/kumomta:latest
+          sleep 5
+      - name: Run sender
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO_EMAILS: ${{ secrets.HF_REPO_EMAILS || 'Valter3B/Trader_Emails' }}
+          HF_REPO_CHECKPOINT: ${{ secrets.HF_REPO_CHECKPOINT || 'Valter3B/veriscope_checkpoints' }}
+          KUMOMTA_HOST: "127.0.0.1"
+          KUMOMTA_PORT: "2525"
+          FROM_NAME: ${{ secrets.FROM_NAME || 'Alex | Liquidity Alert' }}
+          DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
+          DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
+          DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
+          DESEC_TOKEN_4: ${{ secrets.DESEC_TOKEN_4 }}
+          DESEC_TOKEN_5: ${{ secrets.DESEC_TOKEN_5 }}
+          DESEC_TOKEN_6: ${{ secrets.DESEC_TOKEN_6 }}
+          DESEC_TOKEN_7: ${{ secrets.DESEC_TOKEN_7 }}
+          DESEC_TOKEN_8: ${{ secrets.DESEC_TOKEN_8 }}
+          DESEC_TOKEN_9: ${{ secrets.DESEC_TOKEN_9 }}
+          DESEC_TOKEN_10: ${{ secrets.DESEC_TOKEN_10 }}
+          DESEC_TOKEN_11: ${{ secrets.DESEC_TOKEN_11 }}
+          DESEC_TOKEN_12: ${{ secrets.DESEC_TOKEN_12 }}
+          DESEC_TOKEN_13: ${{ secrets.DESEC_TOKEN_13 }}
+          DESEC_TOKEN_14: ${{ secrets.DESEC_TOKEN_14 }}
+          DESEC_TOKEN_15: ${{ secrets.DESEC_TOKEN_15 }}
+          DESEC_TOKEN_16: ${{ secrets.DESEC_TOKEN_16 }}
+          DESEC_TOKEN_17: ${{ secrets.DESEC_TOKEN_17 }}
+          DESEC_TOKEN_18: ${{ secrets.DESEC_TOKEN_18 }}
+          DESEC_TOKEN_19: ${{ secrets.DESEC_TOKEN_19 }}
+          DESEC_TOKEN_20: ${{ secrets.DESEC_TOKEN_20 }}
+          DESEC_TOKEN_21: ${{ secrets.DESEC_TOKEN_21 }}
+          DESEC_TOKEN_22: ${{ secrets.DESEC_TOKEN_22 }}
+          DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
+          DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
+          DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
+          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
+          LOG_LEVEL: INFO
+          SAVE_PATH: ./data
+        run: |
+          python veriscope.py \
             --dataset-source ${{ github.event.inputs.dataset_source || 'hf' }} \
             --day ${{ github.event.inputs.day || '1' }} \
             --runner-id ${{ matrix.runner }} \
             --total-runners 20
-      
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: campaign-logs-${{ github.event.inputs.dataset_source || 'hf' }}-day-${{ github.event.inputs.day || '1' }}-runner-${{ matrix.runner }}
-          path: campaign_state_*.json
+          name: logs-day-${{ github.event.inputs.day || '1' }}-runner-${{ matrix.runner }}
+          path: |
+            ./data/veriscope.log
+            ./data/send_state.json
+            ./data/sender_accounts.json
           retention-days: 7
-          compression-level: 6
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop kumomta || true
+          docker rm kumomta || true
