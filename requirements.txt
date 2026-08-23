@@ -2,8 +2,5 @@ aiosmtplib==3.0.2
 dkimpy==1.1.0
 cryptography==42.0.8
 huggingface-hub==0.24.6
-tenacity==8.5.0
 requests==2.32.3
 python-dotenv==1.0.1
-orjson==3.10.7
-dnspython==2.6.1
