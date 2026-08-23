@@ -1,15 +1,16 @@
-name: Veriscope Test – 1 Conta Real
+name: Veriscope Test – WireGuard + Envio
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  send:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -21,6 +22,41 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Install WireGuard
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wireguard wireguard-tools
+
+      - name: Configure and start WireGuard tunnel
+        run: |
+          # Configuração do túnel Toronto (gerado pela Route64)
+          sudo tee /etc/wireguard/wg0.conf > /dev/null << 'EOF'
+          [Interface]
+          PrivateKey = AHByJsim+rlrtck2V11/BF4ospeBhAtcY83FvR5rgnI=
+          Address = 2a11:6c7:f35:dd::2/64
+          MTU = 1420
+
+          [Peer]
+          PublicKey = IXIO5G3mpyk8P9Em7clyY10v8iInSVqlV7++FxFMtQ0=
+          Endpoint = 23.154.9.27:20109
+          AllowedIPs = ::/0
+          PersistentKeepalive = 15
+          EOF
+
+          # Subir o túnel
+          sudo wg-quick up wg0
+
+          # Adicionar o endereço que usamos no SPF (::10)
+          sudo ip -6 addr add 2a11:6c7:f35:dd::10/128 dev wg0
+
+          # Verificar
+          echo "=== WireGuard status ==="
+          sudo wg show
+          echo "=== Endereços IPv6 ==="
+          ip -6 addr show wg0
+          echo "=== Teste de conectividade ==="
+          ping6 -c 3 2a11:6c7:f35:dd::1 || true
 
       - name: Start KumoMTA
         run: |
@@ -41,14 +77,14 @@ jobs:
           EOF
 
           docker run -d --name kumomta \
-            -p 2525:2525 \
+            --network host \
             -v $(pwd)/policy:/opt/kumomta/etc/policy \
             ghcr.io/kumocorp/kumomta:latest
 
-          sleep 12
+          sleep 10
           docker ps | grep kumomta || (echo "KumoMTA falhou" && docker logs kumomta && exit 1)
 
-      - name: Run Veriscope (cria conta + envia)
+      - name: Run Veriscope Sender
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: Valter3B/veriscope_checkpoints
@@ -81,7 +117,6 @@ jobs:
           DESEC_TOKEN_26: ${{ secrets.DESEC_TOKEN_26 }}
           ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
           ROUTE64_API_URL: ${{ secrets.ROUTE64_API_URL }}
-          ROUTE64_IPV6_BLOCK: ${{ secrets.ROUTE64_IPV6_BLOCK }}
           KUMOMTA_HOST: 127.0.0.1
           KUMOMTA_PORT: 2525
           KUMOMTA_FROM_NAME: Alex | Veriscope
