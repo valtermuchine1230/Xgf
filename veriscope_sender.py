@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Veriscope SMTP Engine – Versão Completa de Teste
-Cria: alex@sub001.veriscope0.dedyn.io
-Envia para: Macuacuavalter71@gmail.com e Info1yenom@gmail.com
-IPv6 atual: 2a11:6c7:f35:dd::10
+Veriscope SMTP Engine – Versão Debug Completa
+Logs extremamente detalhados para identificar qualquer travamento.
 """
 
 from __future__ import annotations
@@ -13,6 +11,7 @@ import json
 import time
 import logging
 import argparse
+import traceback
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
@@ -30,10 +29,10 @@ import aiosmtplib
 import asyncio
 
 # ---------------------------------------------------------------------------
-# Logging
+# Logging extremamente detalhado
 # ---------------------------------------------------------------------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s │ %(levelname)-8s │ %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
@@ -44,14 +43,16 @@ logging.basicConfig(
 logger = logging.getLogger("veriscope")
 
 # ---------------------------------------------------------------------------
-# Configuração fixa
+# Configuração
 # ---------------------------------------------------------------------------
 DOMAIN = "veriscope0.dedyn.io"
 SUB = "sub001"
 FULL_DOMAIN = f"{SUB}.{DOMAIN}"
 EMAIL_ADDRESS = f"alex@{FULL_DOMAIN}"
 SELECTOR = "s2026"
-IPV6 = "2a11:6c7:f35:dd::10"          # ← Novo prefixo do túnel Toronto
+
+# IPv6 do bloco real que aparece no painel Route64 (/56)
+IPV6 = "2a11:6c7:2600:de00::10"
 
 TARGET_EMAILS = [
     "Macuacuavalter71@gmail.com",
@@ -60,6 +61,7 @@ TARGET_EMAILS = [
 
 class Config:
     def __init__(self):
+        logger.info(">>> Iniciando Config.__init__")
         self.hf_token = os.getenv("HF_TOKEN")
         self.hf_repo = os.getenv("HF_REPO", "Valter3B/veriscope_checkpoints")
         self.desec_tokens = [
@@ -79,7 +81,14 @@ class Config:
         self.data_dir.mkdir(exist_ok=True)
         self.account_file = self.data_dir / "account.json"
 
+        logger.info(f"HF_REPO = {self.hf_repo}")
+        logger.info(f"Route64 URL = {self.route64_url}")
+        logger.info(f"KumoMTA = {self.kumomta_host}:{self.kumomta_port}")
+        logger.info(f"IPv6 = {IPV6}")
+        logger.info(f"Tokens deSEC encontrados = {len(self.desec_tokens)}")
+
         self._validate()
+        logger.info(">>> Config carregada com sucesso")
 
     def _validate(self):
         missing = []
@@ -92,10 +101,6 @@ class Config:
         if missing:
             logger.error(f"FALHA DE CONFIGURAÇÃO: {', '.join(missing)}")
             sys.exit(1)
-        logger.info(
-            f"Config OK | domínio={DOMAIN} | tokens={len(self.desec_tokens)} | "
-            f"Route64={self.route64_url} | IPv6={IPV6}"
-        )
 
 config = Config()
 
@@ -104,7 +109,7 @@ class VeriscopeError(Exception):
         super().__init__(f"{message} | {ctx}" if ctx else message)
 
 # ---------------------------------------------------------------------------
-# deSEC Client
+# deSEC
 # ---------------------------------------------------------------------------
 class DesecClient:
     BASE = "https://desec.io/api/v1"
@@ -114,6 +119,7 @@ class DesecClient:
         self.idx = 0
         self.session = requests.Session()
         self.last = 0.0
+        logger.debug("DesecClient inicializado")
 
     def _token(self):
         t = self.tokens[self.idx % len(self.tokens)]
@@ -123,14 +129,21 @@ class DesecClient:
     def _req(self, method, path, **kw):
         elapsed = time.time() - self.last
         if elapsed < 1.0:
-            time.sleep(1.0 - elapsed)
+            sleep_time = 1.0 - elapsed
+            logger.debug(f"deSEC rate-limit sleep {sleep_time:.2f}s")
+            time.sleep(sleep_time)
+
         headers = kw.pop("headers", {})
         headers["Authorization"] = f"Token {self._token()}"
         headers.setdefault("Content-Type", "application/json")
         url = f"{self.BASE}{path}"
+
+        logger.info(f"deSEC REQUEST → {method} {url}")
         try:
-            r = self.session.request(method, url, headers=headers, timeout=30, **kw)
+            r = self.session.request(method, url, headers=headers, timeout=45, **kw)
             self.last = time.time()
+            logger.info(f"deSEC RESPONSE → status={r.status_code}")
+
             if r.status_code == 429:
                 wait = int(r.headers.get("Retry-After", 60))
                 logger.warning(f"deSEC 429 → esperando {wait}s")
@@ -138,61 +151,62 @@ class DesecClient:
                 return self._req(method, path, **kw)
             return r
         except requests.RequestException as e:
+            logger.error(f"deSEC EXCEPTION: {e}")
             raise VeriscopeError("Falha de rede deSEC", error=str(e))
 
     def create_rrsets(self, rrsets: List[Dict]):
-        logger.info(f"deSEC → publicando {len(rrsets)} RRsets em {DOMAIN}")
+        logger.info(f">>> deSEC create_rrsets ({len(rrsets)} registos)")
         r = self._req("PUT", f"/domains/{DOMAIN}/rrsets/", json=rrsets)
         if r.status_code not in (200, 201, 204):
-            raise VeriscopeError(
-                "deSEC falhou",
-                status=r.status_code,
-                body=r.text[:500],
-            )
-        logger.info("deSEC → RRsets publicados com sucesso")
+            logger.error(f"deSEC body: {r.text[:800]}")
+            raise VeriscopeError("deSEC falhou", status=r.status_code, body=r.text[:500])
+        logger.info(">>> deSEC RRsets publicados com sucesso")
 
 # ---------------------------------------------------------------------------
-# Route64 Client (nunca derruba o processo)
+# Route64
 # ---------------------------------------------------------------------------
 class Route64Client:
     def __init__(self, key: str, base: str):
         self.key = key
         self.base = base
         self.s = requests.Session()
+        logger.debug(f"Route64Client inicializado → {base}")
 
     def create_ptr(self, ipv6: str, hostname: str) -> bool:
-        logger.info(f"Route64 → tentando PTR {ipv6} → {hostname}")
+        logger.info(f">>> Route64 create_ptr {ipv6} → {hostname}")
         headers = {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
         }
         try:
+            logger.debug("Tentativa POST /rdns/create/")
             r = self.s.post(
                 f"{self.base}/rdns/create/",
                 headers=headers,
                 json={"ip": ipv6, "hostname": hostname},
                 timeout=20,
             )
+            logger.info(f"Route64 POST status={r.status_code}")
             if r.status_code in (200, 201):
-                logger.info("Route64 → PTR criado com sucesso")
+                logger.info(">>> Route64 PTR criado com sucesso")
                 return True
 
+            logger.debug("Tentativa PUT /rdns/<ip>/")
             r = self.s.put(
                 f"{self.base}/rdns/{ipv6}/",
                 headers=headers,
                 json={"hostname": hostname},
                 timeout=20,
             )
+            logger.info(f"Route64 PUT status={r.status_code}")
             if r.status_code in (200, 201):
-                logger.info("Route64 → PTR criado com sucesso (PUT)")
+                logger.info(">>> Route64 PTR criado com sucesso (PUT)")
                 return True
 
-            logger.warning(
-                f"Route64 PTR falhou (status {r.status_code}): {r.text[:300]}"
-            )
+            logger.warning(f"Route64 PTR falhou (status {r.status_code}): {r.text[:400]}")
             return False
         except Exception as e:
-            logger.warning(f"Route64 PTR falhou (rede): {e}")
+            logger.warning(f"Route64 PTR EXCEPTION: {e}")
             return False
 
 # ---------------------------------------------------------------------------
@@ -201,6 +215,7 @@ class Route64Client:
 class DKIMManager:
     @staticmethod
     def generate() -> Tuple[str, str]:
+        logger.info(">>> Gerando chave DKIM 2048-bit…")
         priv = rsa.generate_private_key(
             public_exponent=65537, key_size=2048, backend=default_backend()
         )
@@ -215,10 +230,12 @@ class DKIMManager:
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ).decode()
         lines = [l for l in pub_pem.splitlines() if not l.startswith("-----")]
+        logger.info(">>> Chave DKIM gerada")
         return priv_pem, "".join(lines)
 
     @staticmethod
     def sign(msg: bytes, domain: str, selector: str, priv_pem: str) -> bytes:
+        logger.debug(f"Assinando DKIM domain={domain} selector={selector}")
         return dkim.sign(
             msg,
             selector.encode(),
@@ -229,10 +246,11 @@ class DKIMManager:
         )
 
 # ---------------------------------------------------------------------------
-# Criar conta profissional
+# Criar conta
 # ---------------------------------------------------------------------------
 def create_account() -> Dict:
-    logger.info("=== CRIANDO CONTA PROFISSIONAL ===")
+    logger.info("=" * 60)
+    logger.info(">>> INÍCIO create_account()")
     logger.info(f"Endereço: {EMAIL_ADDRESS}")
     logger.info(f"IPv6: {IPV6}")
 
@@ -240,7 +258,6 @@ def create_account() -> Dict:
     route64 = Route64Client(config.route64_key, config.route64_url)
 
     priv_pem, pub_b64 = DKIMManager.generate()
-    logger.info("Chave DKIM 2048-bit gerada")
 
     rrsets = [
         {
@@ -269,9 +286,10 @@ def create_account() -> Dict:
         },
     ]
 
+    logger.info(">>> Chamando deSEC…")
     desec.create_rrsets(rrsets)
 
-    # PTR (não bloqueia se falhar)
+    logger.info(">>> Chamando Route64 PTR…")
     route64.create_ptr(IPV6, FULL_DOMAIN)
 
     account = {
@@ -285,9 +303,13 @@ def create_account() -> Dict:
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    logger.info(">>> Gravando account.json localmente…")
     with open(config.account_file, "w") as f:
         json.dump(account, f, indent=2)
+    logger.info(">>> account.json gravado")
 
+    # Upload HF com timeout e nunca bloqueia
+    logger.info(">>> Tentando upload HuggingFace (timeout 30s)…")
     try:
         api = HfApi(token=config.hf_token)
         api.upload_file(
@@ -295,57 +317,49 @@ def create_account() -> Dict:
             path_in_repo="accounts/email_0001.json",
             repo_id=config.hf_repo,
             repo_type="dataset",
-            commit_message="Conta alex@sub001.veriscope0.dedyn.io criada",
+            commit_message="Conta alex@sub001.veriscope0.dedyn.io",
         )
-        logger.info("Conta enviada para HuggingFace")
+        logger.info(">>> Upload HuggingFace OK")
     except Exception as e:
-        logger.warning(f"Upload HF (não crítico): {e}")
+        logger.warning(f"Upload HF falhou (não crítico): {e}")
 
-    logger.info(f"✓ Conta criada: {EMAIL_ADDRESS}")
+    logger.info(f">>> Conta criada com sucesso: {EMAIL_ADDRESS}")
+    logger.info("=" * 60)
     return account
 
 # ---------------------------------------------------------------------------
 # Enviar e-mail
 # ---------------------------------------------------------------------------
 async def send_email(account: Dict, to_addr: str) -> str:
-    logger.info(f"Enviando para {to_addr}…")
+    logger.info(f">>> INÍCIO send_email → {to_addr}")
 
-    subject = f"Veriscope – Teste de Deliverability ({datetime.now().strftime('%H:%M')})"
+    subject = f"Veriscope – Teste ({datetime.now().strftime('%H:%M:%S')})"
 
     html = f"""
     <!DOCTYPE html>
     <html>
     <head><meta charset="UTF-8"></head>
-    <body style="margin:0; padding:0; background:#0a0a0a; font-family:Arial,Helvetica,sans-serif;">
-      <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0a; padding:40px 0;">
-        <tr>
-          <td align="center">
-            <table width="560" cellpadding="0" cellspacing="0" style="background:#111111; border-radius:12px; border:1px solid #2a2a2a;">
-              <tr>
-                <td style="padding:32px 40px 24px; text-align:center; border-bottom:1px solid #222;">
-                  <div style="display:inline-block; width:64px; height:64px; border:2px solid #C9A567; border-radius:50%; line-height:60px; color:#C9A567; font-size:28px; font-weight:bold;">◆</div>
-                  <div style="margin-top:12px; color:#F5F5F3; font-size:22px; font-weight:700; letter-spacing:6px;">VERISCOPE</div>
-                </td>
-              </tr>
-              <tr>
-                <td style="padding:36px 40px; color:#e0e0e0; font-size:15px; line-height:1.7;">
-                  <p style="margin:0 0 16px; color:#C9A567; font-size:13px; letter-spacing:1px; text-transform:uppercase;">Teste de Deliverability</p>
-                  <h2 style="margin:0 0 20px; color:#ffffff; font-size:22px;">Sistema operacional</h2>
-                  <p style="margin:0 0 16px;">Este é um e-mail de teste enviado pelo motor SMTP Veriscope.</p>
-                  <p style="margin:0 0 8px;"><strong style="color:#C9A567;">Conta de envio:</strong><br><span style="color:#ffffff;">{account['address']}</span></p>
-                  <p style="margin:0 0 8px;"><strong style="color:#C9A567;">IPv6:</strong><br><code style="color:#aaa;">{account['ipv6']}</code></p>
-                  <p style="margin:0 0 24px;"><strong style="color:#C9A567;">Horário (UTC):</strong><br>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</p>
-                  <p style="margin:0; color:#999; font-size:13px;">Se este e-mail chegou à caixa de entrada (não ao spam), a autenticação SPF + DKIM + DMARC está a funcionar.</p>
-                </td>
-              </tr>
-              <tr>
-                <td style="padding:20px 40px; background:#0d0d0d; border-top:1px solid #222; text-align:center;">
-                  <p style="margin:0; color:#666; font-size:12px;">Alex | Veriscope<br><span style="color:#444;">Teste automático – pode ignorar</span></p>
-                </td>
-              </tr>
-            </table>
-          </td>
-        </tr>
+    <body style="margin:0;padding:0;background:#0a0a0a;font-family:Arial,sans-serif;">
+      <table width="100%" style="background:#0a0a0a;padding:40px 0;">
+        <tr><td align="center">
+          <table width="560" style="background:#111;border-radius:12px;border:1px solid #2a2a2a;">
+            <tr>
+              <td style="padding:32px 40px;text-align:center;border-bottom:1px solid #222;">
+                <div style="font-size:28px;color:#C9A567;">◆</div>
+                <div style="margin-top:10px;color:#F5F5F3;font-size:22px;font-weight:700;letter-spacing:6px;">VERISCOPE</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:36px 40px;color:#e0e0e0;font-size:15px;line-height:1.7;">
+                <p style="color:#C9A567;font-size:13px;text-transform:uppercase;">Teste de Deliverability</p>
+                <h2 style="color:#fff;margin:10px 0 20px;">Sistema operacional</h2>
+                <p>Conta: <strong>{account['address']}</strong></p>
+                <p>IPv6: <code>{account['ipv6']}</code></p>
+                <p>Hora UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</p>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
       </table>
     </body>
     </html>
@@ -360,23 +374,27 @@ async def send_email(account: Dict, to_addr: str) -> str:
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     raw = msg.as_bytes()
+    logger.debug("Assinando mensagem com DKIM…")
     signed = DKIMManager.sign(
         raw,
         domain=account["domain"],
         selector=account["dkim_selector"],
         priv_pem=account["dkim_private_pem"],
     )
+    logger.debug(f"Mensagem assinada ({len(signed)} bytes)")
 
     try:
+        logger.info(f"Ligando ao KumoMTA {config.kumomta_host}:{config.kumomta_port}…")
         smtp = aiosmtplib.SMTP(
             hostname=config.kumomta_host,
             port=config.kumomta_port,
-            timeout=40,
+            timeout=30,
             use_tls=False,
             start_tls=False,
             validate_certs=False,
         )
         await smtp.connect()
+        logger.info("Ligado ao KumoMTA. A enviar…")
         await smtp.sendmail(account["address"], [to_addr], signed)
         await smtp.quit()
         logger.info(f"✓ Enviado com sucesso → {to_addr}")
@@ -385,16 +403,22 @@ async def send_email(account: Dict, to_addr: str) -> str:
         logger.error(f"SMTP {e.code} → {to_addr}: {e.message}")
         return f"{e.code} {e.message}"
     except Exception as e:
+        logger.error(f"Falha SMTP: {e}")
+        logger.error(traceback.format_exc())
         raise VeriscopeError("Falha SMTP", to=to_addr, error=str(e))
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 async def main():
-    parser = argparse.ArgumentParser(description="Veriscope SMTP – Teste Completo")
-    parser.add_argument("--provision", action="store_true", help="Criar a conta")
-    parser.add_argument("--send", action="store_true", help="Enviar os e-mails")
-    parser.add_argument("--full", action="store_true", help="Criar + Enviar")
+    logger.info("=" * 60)
+    logger.info("VERISCOPE SENDER – INÍCIO")
+    logger.info("=" * 60)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--provision", action="store_true")
+    parser.add_argument("--send", action="store_true")
+    parser.add_argument("--full", action="store_true")
     args = parser.parse_args()
 
     if not any([args.provision, args.send, args.full]):
@@ -405,22 +429,29 @@ async def main():
         account = None
 
         if args.provision or args.full:
+            logger.info(">>> Modo PROVISION / FULL – a criar conta…")
             account = create_account()
-            logger.info("Aguardando 25 segundos para propagação DNS…")
-            time.sleep(25)
+            logger.info(">>> Aguardando 20 segundos para propagação DNS…")
+            time.sleep(20)
+            logger.info(">>> Fim da espera de propagação")
 
         if args.send or args.full:
+            logger.info(">>> Modo SEND / FULL – a enviar e-mails…")
             if account is None:
                 if not config.account_file.exists():
                     raise VeriscopeError("Conta não existe. Rode --provision primeiro")
+                logger.info(">>> A carregar account.json…")
                 with open(config.account_file) as f:
                     account = json.load(f)
+                logger.info(f">>> Conta carregada: {account['address']}")
 
             results = {}
-            for email in TARGET_EMAILS:
+            for i, email in enumerate(TARGET_EMAILS, 1):
+                logger.info(f">>> Envio {i}/{len(TARGET_EMAILS)}")
                 code = await send_email(account, email)
                 results[email] = code
-                time.sleep(4)
+                logger.info(f">>> Resultado {email}: {code}")
+                time.sleep(3)
 
             logger.info("=" * 60)
             logger.info("RESUMO FINAL")
@@ -436,13 +467,14 @@ async def main():
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }, f, indent=2)
 
-        logger.info("Processo concluído.")
+        logger.info(">>> PROCESSO CONCLUÍDO COM SUCESSO")
 
     except VeriscopeError as e:
         logger.error(f"ERRO VERISCOPE: {e}")
         sys.exit(1)
     except Exception as e:
-        logger.exception(f"Erro inesperado: {e}")
+        logger.error(f"ERRO INESPERADO: {e}")
+        logger.error(traceback.format_exc())
         sys.exit(1)
 
 if __name__ == "__main__":
