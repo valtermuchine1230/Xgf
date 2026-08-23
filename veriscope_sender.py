@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Veriscope SMTP Engine – Teste Completo
+Veriscope SMTP Engine – Teste Completo (corrigido)
 Cria: alex@sub001.veriscope0.dedyn.io
 Envia para: Macuacuavalter71@gmail.com e Info1yenom@gmail.com
 """
@@ -17,7 +17,6 @@ from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
 from email.utils import formatdate, make_msgid
 
 import requests
@@ -41,12 +40,12 @@ logging.basicConfig(
 logger = logging.getLogger("veriscope")
 
 # ---------------------------------------------------------------------------
-# Configuração fixa para este teste
+# Configuração fixa
 # ---------------------------------------------------------------------------
 DOMAIN = "veriscope0.dedyn.io"
 SUB = "sub001"
-FULL_DOMAIN = f"{SUB}.{DOMAIN}"          # sub001.veriscope0.dedyn.io
-EMAIL_ADDRESS = f"alex@{FULL_DOMAIN}"    # alex@sub001.veriscope0.dedyn.io
+FULL_DOMAIN = f"{SUB}.{DOMAIN}"
+EMAIL_ADDRESS = f"alex@{FULL_DOMAIN}"
 SELECTOR = "s2026"
 IPV6 = "2a11:6c7:f10:5::10"
 
@@ -65,7 +64,10 @@ class Config:
             if os.getenv(f"DESEC_TOKEN_{i}")
         ]
         self.route64_key = os.getenv("ROUTE64_API_KEY")
-        self.route64_url = os.getenv("ROUTE64_API_URL", "https://manager.route64.org/api").rstrip("/")
+        # URL CORRETA (manager.route64.org)
+        self.route64_url = os.getenv(
+            "ROUTE64_API_URL", "https://manager.route64.org/api"
+        ).rstrip("/")
         self.kumomta_host = os.getenv("KUMOMTA_HOST", "127.0.0.1")
         self.kumomta_port = int(os.getenv("KUMOMTA_PORT", "2525"))
         self.from_name = os.getenv("KUMOMTA_FROM_NAME", "Alex | Veriscope")
@@ -87,7 +89,7 @@ class Config:
         if missing:
             logger.error(f"FALHA DE CONFIGURAÇÃO: {', '.join(missing)}")
             sys.exit(1)
-        logger.info(f"Config OK | domínio={DOMAIN} | tokens={len(self.desec_tokens)}")
+        logger.info(f"Config OK | domínio={DOMAIN} | tokens={len(self.desec_tokens)} | Route64={self.route64_url}")
 
 config = Config()
 
@@ -144,23 +146,52 @@ class DesecClient:
         logger.info("deSEC → RRsets publicados com sucesso")
 
 # ---------------------------------------------------------------------------
-# Route64
+# Route64 (nunca derruba o processo)
 # ---------------------------------------------------------------------------
 class Route64Client:
-    def __init__(self, key, base):
+    def __init__(self, key: str, base: str):
         self.key = key
         self.base = base
         self.s = requests.Session()
 
-    def create_ptr(self, ipv6, hostname):
-        logger.info(f"Route64 → PTR {ipv6} → {hostname}")
-        headers = {"Authorization": f"Bearer {self.key}", "Content-Type": "application/json"}
-        r = self.s.post(f"{self.base}/rdns/create/", headers=headers, json={"ip": ipv6, "hostname": hostname}, timeout=25)
-        if r.status_code not in (200, 201):
-            r = self.s.put(f"{self.base}/rdns/{ipv6}/", headers=headers, json={"hostname": hostname}, timeout=25)
-        if r.status_code not in (200, 201):
-            raise VeriscopeError("Route64 PTR falhou", status=r.status_code, body=r.text[:300])
-        logger.info("Route64 → PTR criado")
+    def create_ptr(self, ipv6: str, hostname: str) -> bool:
+        """Tenta criar PTR. Retorna True se sucesso, False se falhar (não levanta exceção)."""
+        logger.info(f"Route64 → tentando PTR {ipv6} → {hostname}")
+        headers = {
+            "Authorization": f"Bearer {self.key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            # Tentativa 1
+            r = self.s.post(
+                f"{self.base}/rdns/create/",
+                headers=headers,
+                json={"ip": ipv6, "hostname": hostname},
+                timeout=20,
+            )
+            if r.status_code in (200, 201):
+                logger.info("Route64 → PTR criado com sucesso")
+                return True
+
+            # Tentativa 2
+            r = self.s.put(
+                f"{self.base}/rdns/{ipv6}/",
+                headers=headers,
+                json={"hostname": hostname},
+                timeout=20,
+            )
+            if r.status_code in (200, 201):
+                logger.info("Route64 → PTR criado com sucesso (PUT)")
+                return True
+
+            logger.warning(
+                f"Route64 PTR falhou (status {r.status_code}): {r.text[:300]}"
+            )
+            return False
+
+        except Exception as e:
+            logger.warning(f"Route64 PTR falhou (rede/DNS): {e}")
+            return False
 
 # ---------------------------------------------------------------------------
 # DKIM
@@ -168,7 +199,9 @@ class Route64Client:
 class DKIMManager:
     @staticmethod
     def generate() -> Tuple[str, str]:
-        priv = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+        priv = rsa.generate_private_key(
+            public_exponent=65537, key_size=2048, backend=default_backend()
+        )
         priv_pem = priv.private_bytes(
             encoding=serialization.Encoding.PEM,
             format=serialization.PrivateFormat.PKCS8,
@@ -194,7 +227,7 @@ class DKIMManager:
         )
 
 # ---------------------------------------------------------------------------
-# Criar conta profissional
+# Criar conta
 # ---------------------------------------------------------------------------
 def create_account() -> Dict:
     logger.info("=== CRIANDO CONTA PROFISSIONAL ===")
@@ -235,10 +268,8 @@ def create_account() -> Dict:
 
     desec.create_rrsets(rrsets)
 
-    try:
-        route64.create_ptr(IPV6, FULL_DOMAIN)
-    except VeriscopeError as e:
-        logger.warning(f"PTR Route64 falhou (continua): {e}")
+    # PTR é opcional – nunca derruba o processo
+    route64.create_ptr(IPV6, FULL_DOMAIN)
 
     account = {
         "id": "email_0001",
@@ -271,79 +302,44 @@ def create_account() -> Dict:
     return account
 
 # ---------------------------------------------------------------------------
-# Enviar e-mail profissional com logo
+# Enviar e-mail
 # ---------------------------------------------------------------------------
 async def send_email(account: Dict, to_addr: str) -> str:
     logger.info(f"Enviando para {to_addr}…")
 
     subject = f"Veriscope – Teste de Deliverability ({datetime.now().strftime('%H:%M')})"
 
-    # HTML profissional com branding Veriscope
     html = f"""
     <!DOCTYPE html>
     <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    </head>
+    <head><meta charset="UTF-8"></head>
     <body style="margin:0; padding:0; background:#0a0a0a; font-family:Arial,Helvetica,sans-serif;">
       <table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0a0a; padding:40px 0;">
         <tr>
           <td align="center">
-            <table width="560" cellpadding="0" cellspacing="0" style="background:#111111; border-radius:12px; overflow:hidden; border:1px solid #2a2a2a;">
-              
-              <!-- Header com logo -->
+            <table width="560" cellpadding="0" cellspacing="0" style="background:#111111; border-radius:12px; border:1px solid #2a2a2a;">
               <tr>
                 <td style="padding:32px 40px 24px; text-align:center; border-bottom:1px solid #222;">
-                  <div style="display:inline-block; width:64px; height:64px; border:2px solid #C9A567; border-radius:50%; line-height:60px; color:#C9A567; font-size:28px; font-weight:bold;">
-                    ◆
-                  </div>
-                  <div style="margin-top:12px; color:#F5F5F3; font-size:22px; font-weight:700; letter-spacing:6px;">
-                    VERISCOPE
-                  </div>
+                  <div style="display:inline-block; width:64px; height:64px; border:2px solid #C9A567; border-radius:50%; line-height:60px; color:#C9A567; font-size:28px; font-weight:bold;">◆</div>
+                  <div style="margin-top:12px; color:#F5F5F3; font-size:22px; font-weight:700; letter-spacing:6px;">VERISCOPE</div>
                 </td>
               </tr>
-
-              <!-- Corpo -->
               <tr>
                 <td style="padding:36px 40px; color:#e0e0e0; font-size:15px; line-height:1.7;">
-                  <p style="margin:0 0 16px; color:#C9A567; font-size:13px; letter-spacing:1px; text-transform:uppercase;">
-                    Teste de Deliverability
-                  </p>
-                  <h2 style="margin:0 0 20px; color:#ffffff; font-size:22px; font-weight:600;">
-                    Sistema operacional
-                  </h2>
-                  <p style="margin:0 0 16px;">
-                    Este é um e-mail de teste enviado pelo motor SMTP Veriscope.
-                  </p>
-                  <p style="margin:0 0 8px;">
-                    <strong style="color:#C9A567;">Conta de envio:</strong><br>
-                    <span style="color:#ffffff;">{account['address']}</span>
-                  </p>
-                  <p style="margin:0 0 8px;">
-                    <strong style="color:#C9A567;">IPv6:</strong><br>
-                    <code style="color:#aaa;">{account['ipv6']}</code>
-                  </p>
-                  <p style="margin:0 0 24px;">
-                    <strong style="color:#C9A567;">Horário (UTC):</strong><br>
-                    {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}
-                  </p>
-                  <p style="margin:0; color:#999; font-size:13px;">
-                    Se este e-mail chegou à caixa de entrada (não ao spam), a autenticação SPF + DKIM + DMARC está a funcionar corretamente.
-                  </p>
+                  <p style="margin:0 0 16px; color:#C9A567; font-size:13px; letter-spacing:1px; text-transform:uppercase;">Teste de Deliverability</p>
+                  <h2 style="margin:0 0 20px; color:#ffffff; font-size:22px;">Sistema operacional</h2>
+                  <p style="margin:0 0 16px;">Este é um e-mail de teste enviado pelo motor SMTP Veriscope.</p>
+                  <p style="margin:0 0 8px;"><strong style="color:#C9A567;">Conta de envio:</strong><br><span style="color:#ffffff;">{account['address']}</span></p>
+                  <p style="margin:0 0 8px;"><strong style="color:#C9A567;">IPv6:</strong><br><code style="color:#aaa;">{account['ipv6']}</code></p>
+                  <p style="margin:0 0 24px;"><strong style="color:#C9A567;">Horário (UTC):</strong><br>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</p>
+                  <p style="margin:0; color:#999; font-size:13px;">Se este e-mail chegou à caixa de entrada (não ao spam), a autenticação SPF + DKIM + DMARC está a funcionar.</p>
                 </td>
               </tr>
-
-              <!-- Footer -->
               <tr>
                 <td style="padding:20px 40px; background:#0d0d0d; border-top:1px solid #222; text-align:center;">
-                  <p style="margin:0; color:#666; font-size:12px;">
-                    Alex | Veriscope<br>
-                    <span style="color:#444;">Teste automático – pode ignorar</span>
-                  </p>
+                  <p style="margin:0; color:#666; font-size:12px;">Alex | Veriscope<br><span style="color:#444;">Teste automático – pode ignorar</span></p>
                 </td>
               </tr>
-
             </table>
           </td>
         </tr>
