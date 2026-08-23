@@ -1,195 +1,103 @@
-name: Veriscope Email Sender
+name: Veriscope Test Sender (1 conta → 2 emails)
 
 on:
-  schedule:
-    - cron: '0 0 * * 1-5'  # Segunda a Sexta às 00:00 UTC
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Modo de execução'
-        required: true
-        default: 'all'
-        type: choice
-        options:
-          - all          # Provisiona DNS + envia 5 emails de teste
-          - provision    # Apenas configura DNS (SPF, DKIM, DMARC)
-          - send-test    # Apenas envia os 5 emails (DNS já configurado)
-
-# ===========================================================================
-# CONCURRENCY — garante que apenas um runner por vez processa o mesmo estado
-# ===========================================================================
 
 concurrency:
-  group: veriscope-sender-${{ github.ref }}
+  group: veriscope-test
   cancel-in-progress: false
 
 jobs:
-  # =========================================================================
-  # JOB 1: PROVISIONAMENTO DNS (opcional, executado quando mode = provision ou all)
-  # =========================================================================
-  provision:
-    name: Provisionar DNS (SPF, DKIM, DMARC)
+  test-send:
     runs-on: ubuntu-latest
-    if: github.event.inputs.mode == 'provision' || github.event.inputs.mode == 'all'
-    timeout-minutes: 10
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout código
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Instalar dependências
-        run: pip install --no-cache-dir -r requirements.txt
-
-      - name: Executar provisionamento DNS
-        env:
-          DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
+      - name: Install dependencies
         run: |
-          python veriscope.py --provision
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-  # =========================================================================
-  # JOB 2: ENVIO DE EMAILS DE TESTE (executado quando mode = send-test ou all)
-  # =========================================================================
-  send-test:
-    name: Enviar 5 emails de teste
-    runs-on: ubuntu-latest
-    needs: [provision]
-    if: github.event.inputs.mode == 'send-test' || github.event.inputs.mode == 'all'
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      # Apenas 1 runner para teste (evita duplicação)
-      matrix:
-        runner: [1]
-
-    steps:
-      - name: Checkout código
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Instalar dependências
-        run: pip install --no-cache-dir -r requirements.txt
-
-      - name: Setup KumoMTA (Docker)
+      - name: Start KumoMTA
         run: |
-          # Criar configuração mínima do KumoMTA
-          mkdir -p ./kumomta-config
-          cat > ./kumomta-config/init.lua << 'EOF'
+          mkdir -p policy
+          cat > policy/init.lua << 'EOF'
           local kumo = require 'kumo'
           kumo.on('init', function()
             kumo.start_esmtp_listener {
               listen = '0.0.0.0:2525',
-              relay_hosts = { '0.0.0.0/0' },
+              relay_hosts = { '127.0.0.1', '::1', '0.0.0.0/0' },
             }
-            kumo.define_spool { name = 'data', path = '/tmp/kumo-data' }
-            kumo.define_spool { name = 'meta', path = '/tmp/kumo-meta' }
+            kumo.define_spool { name = 'data', path = '/tmp/kumo/data' }
+            kumo.define_spool { name = 'meta', path = '/tmp/kumo/meta' }
           end)
           kumo.on('smtp_server_message_received', function(msg)
-            msg:set_meta('queue', 'null')
+            msg:set_meta('queue', 'default')
           end)
           EOF
 
-          # Usar a imagem oficial do GHCR
-          docker pull ghcr.io/kumocorp/kumomta:latest
-          docker run -d --name kumomta -p 2525:2525 \
-            -v $(pwd)/kumomta-config:/opt/kumomta/etc/policy \
+          docker run -d --name kumomta \
+            -p 2525:2525 \
+            -v $(pwd)/policy:/opt/kumomta/etc/policy \
             ghcr.io/kumocorp/kumomta:latest
-          sleep 5
-          netstat -tulpn | grep 2525 || true
 
-      - name: Executar envio de teste
+          sleep 10
+          docker ps | grep kumomta || (echo "ERRO: KumoMTA não iniciou" && docker logs kumomta && exit 1)
+          echo "KumoMTA a correr na porta 2525"
+
+      - name: Run Veriscope Sender (1 conta + 2 emails)
         env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: Valter3B/veriscope_checkpoints
+          DESEC_DOMAIN: ${{ secrets.DESEC_DOMAIN }}
           DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
-          KUMOMTA_HOST: "127.0.0.1"
-          KUMOMTA_PORT: "2525"
-          # Se não usares KumoMTA, podes definir o teu próprio SMTP:
-          # KUMOMTA_HOST: "smtp.teuservidor.com"
-          # KUMOMTA_PORT: "587"
-        run: |
-          python veriscope.py --send-test
+          DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
+          DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
+          DESEC_TOKEN_4: ${{ secrets.DESEC_TOKEN_4 }}
+          DESEC_TOKEN_5: ${{ secrets.DESEC_TOKEN_5 }}
+          DESEC_TOKEN_6: ${{ secrets.DESEC_TOKEN_6 }}
+          DESEC_TOKEN_7: ${{ secrets.DESEC_TOKEN_7 }}
+          DESEC_TOKEN_8: ${{ secrets.DESEC_TOKEN_8 }}
+          DESEC_TOKEN_9: ${{ secrets.DESEC_TOKEN_9 }}
+          DESEC_TOKEN_10: ${{ secrets.DESEC_TOKEN_10 }}
+          DESEC_TOKEN_11: ${{ secrets.DESEC_TOKEN_11 }}
+          DESEC_TOKEN_12: ${{ secrets.DESEC_TOKEN_12 }}
+          DESEC_TOKEN_13: ${{ secrets.DESEC_TOKEN_13 }}
+          DESEC_TOKEN_14: ${{ secrets.DESEC_TOKEN_14 }}
+          DESEC_TOKEN_15: ${{ secrets.DESEC_TOKEN_15 }}
+          DESEC_TOKEN_16: ${{ secrets.DESEC_TOKEN_16 }}
+          DESEC_TOKEN_17: ${{ secrets.DESEC_TOKEN_17 }}
+          DESEC_TOKEN_18: ${{ secrets.DESEC_TOKEN_18 }}
+          DESEC_TOKEN_19: ${{ secrets.DESEC_TOKEN_19 }}
+          DESEC_TOKEN_20: ${{ secrets.DESEC_TOKEN_20 }}
+          DESEC_TOKEN_21: ${{ secrets.DESEC_TOKEN_21 }}
+          DESEC_TOKEN_22: ${{ secrets.DESEC_TOKEN_22 }}
+          DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
+          DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
+          DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
+          DESEC_TOKEN_26: ${{ secrets.DESEC_TOKEN_26 }}
+          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
+          ROUTE64_API_URL: ${{ secrets.ROUTE64_API_URL }}
+          ROUTE64_IPV6_BLOCK: ${{ secrets.ROUTE64_IPV6_BLOCK }}
+          KUMOMTA_HOST: 127.0.0.1
+          KUMOMTA_PORT: 2525
+          KUMOMTA_FROM_NAME: ${{ secrets.KUMOMTA_FROM_NAME }}
+        run: python veriscope_sender.py
 
-      - name: Upload de logs (sempre)
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-test
+          name: veriscope-logs
           path: |
-            ./data/veriscope.log
-            ./data/send_state.json
-            ./data/sender_accounts.json
-          retention-days: 7
-
-      - name: Limpar container KumoMTA
-        if: always()
-        run: |
-          docker stop kumomta || true
-          docker rm kumomta || true
-
-  # =========================================================================
-  # (OPCIONAL) Job para produção futura — 20 runners em paralelo
-  # Este job está desativado por enquanto, mas pode ser ativado quando quiseres
-  # enviar para os 30M leads.
-  # =========================================================================
-  # send-production:
-  #   name: Enviar para produção (30M) - Runner ${{ matrix.runner }}
-  #   runs-on: ubuntu-latest
-  #   needs: [provision]
-  #   if: false  # desativado por enquanto
-  #   timeout-minutes: 360
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       runner: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-  #   concurrency:
-  #     group: veriscope-prod-${{ strategy.job-index }}
-  #     cancel-in-progress: false
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Setup Python
-  #       uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.11'
-  #     - name: Install dependencies
-  #       run: pip install --no-cache-dir -r requirements.txt
-  #     - name: Setup KumoMTA
-  #       run: |
-  #         mkdir -p ./kumomta-config
-  #         cat > ./kumomta-config/init.lua << 'EOF'
-  #         local kumo = require 'kumo'
-  #         kumo.on('init', function()
-  #           kumo.start_esmtp_listener { listen = '0.0.0.0:2525', relay_hosts = { '0.0.0.0/0' } }
-  #           kumo.define_spool { name = 'data', path = '/tmp/kumo-data' }
-  #           kumo.define_spool { name = 'meta', path = '/tmp/kumo-meta' }
-  #         end)
-  #         kumo.on('smtp_server_message_received', function(msg) msg:set_meta('queue', 'null') end)
-  #         EOF
-  #         docker pull ghcr.io/kumocorp/kumomta:latest
-  #         docker run -d --name kumomta -p 2525:2525 -v $(pwd)/kumomta-config:/opt/kumomta/etc/policy ghcr.io/kumocorp/kumomta:latest
-  #         sleep 5
-  #     - name: Run production sender
-  #       env:
-  #         DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
-  #         KUMOMTA_HOST: "127.0.0.1"
-  #         KUMOMTA_PORT: "2525"
-  #         # ... outras variáveis para produção (HF_TOKEN, etc.)
-  #       run: |
-  #         python veriscope.py --send-production --runner ${{ matrix.runner }} --total-runners 20
-  #     - name: Upload logs
-  #       if: always()
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: logs-prod-runner-${{ matrix.runner }}
-  #         path: ./data/veriscope.log
-  #         retention-days: 7
-  #     - name: Cleanup
-  #       if: always()
-  #       run: |
-  #         docker stop kumomta || true
-  #         docker rm kumomta || true
+            veriscope.log
+            data/
