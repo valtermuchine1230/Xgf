@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Veriscope SMTP Engine – Teste Completo (corrigido)
+Veriscope SMTP Engine – Versão Completa de Teste
 Cria: alex@sub001.veriscope0.dedyn.io
 Envia para: Macuacuavalter71@gmail.com e Info1yenom@gmail.com
+IPv6 atual: 2a11:6c7:f35:dd::10
 """
 
 from __future__ import annotations
@@ -28,6 +29,9 @@ import dkim
 import aiosmtplib
 import asyncio
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s │ %(levelname)-8s │ %(message)s",
@@ -47,7 +51,7 @@ SUB = "sub001"
 FULL_DOMAIN = f"{SUB}.{DOMAIN}"
 EMAIL_ADDRESS = f"alex@{FULL_DOMAIN}"
 SELECTOR = "s2026"
-IPV6 = "2a11:6c7:f10:5::10"
+IPV6 = "2a11:6c7:f35:dd::10"          # ← Novo prefixo do túnel Toronto
 
 TARGET_EMAILS = [
     "Macuacuavalter71@gmail.com",
@@ -64,7 +68,6 @@ class Config:
             if os.getenv(f"DESEC_TOKEN_{i}")
         ]
         self.route64_key = os.getenv("ROUTE64_API_KEY")
-        # URL CORRETA (manager.route64.org)
         self.route64_url = os.getenv(
             "ROUTE64_API_URL", "https://manager.route64.org/api"
         ).rstrip("/")
@@ -89,7 +92,10 @@ class Config:
         if missing:
             logger.error(f"FALHA DE CONFIGURAÇÃO: {', '.join(missing)}")
             sys.exit(1)
-        logger.info(f"Config OK | domínio={DOMAIN} | tokens={len(self.desec_tokens)} | Route64={self.route64_url}")
+        logger.info(
+            f"Config OK | domínio={DOMAIN} | tokens={len(self.desec_tokens)} | "
+            f"Route64={self.route64_url} | IPv6={IPV6}"
+        )
 
 config = Config()
 
@@ -98,7 +104,7 @@ class VeriscopeError(Exception):
         super().__init__(f"{message} | {ctx}" if ctx else message)
 
 # ---------------------------------------------------------------------------
-# deSEC
+# deSEC Client
 # ---------------------------------------------------------------------------
 class DesecClient:
     BASE = "https://desec.io/api/v1"
@@ -146,7 +152,7 @@ class DesecClient:
         logger.info("deSEC → RRsets publicados com sucesso")
 
 # ---------------------------------------------------------------------------
-# Route64 (nunca derruba o processo)
+# Route64 Client (nunca derruba o processo)
 # ---------------------------------------------------------------------------
 class Route64Client:
     def __init__(self, key: str, base: str):
@@ -155,14 +161,12 @@ class Route64Client:
         self.s = requests.Session()
 
     def create_ptr(self, ipv6: str, hostname: str) -> bool:
-        """Tenta criar PTR. Retorna True se sucesso, False se falhar (não levanta exceção)."""
         logger.info(f"Route64 → tentando PTR {ipv6} → {hostname}")
         headers = {
             "Authorization": f"Bearer {self.key}",
             "Content-Type": "application/json",
         }
         try:
-            # Tentativa 1
             r = self.s.post(
                 f"{self.base}/rdns/create/",
                 headers=headers,
@@ -173,7 +177,6 @@ class Route64Client:
                 logger.info("Route64 → PTR criado com sucesso")
                 return True
 
-            # Tentativa 2
             r = self.s.put(
                 f"{self.base}/rdns/{ipv6}/",
                 headers=headers,
@@ -188,9 +191,8 @@ class Route64Client:
                 f"Route64 PTR falhou (status {r.status_code}): {r.text[:300]}"
             )
             return False
-
         except Exception as e:
-            logger.warning(f"Route64 PTR falhou (rede/DNS): {e}")
+            logger.warning(f"Route64 PTR falhou (rede): {e}")
             return False
 
 # ---------------------------------------------------------------------------
@@ -227,11 +229,12 @@ class DKIMManager:
         )
 
 # ---------------------------------------------------------------------------
-# Criar conta
+# Criar conta profissional
 # ---------------------------------------------------------------------------
 def create_account() -> Dict:
     logger.info("=== CRIANDO CONTA PROFISSIONAL ===")
     logger.info(f"Endereço: {EMAIL_ADDRESS}")
+    logger.info(f"IPv6: {IPV6}")
 
     desec = DesecClient(config.desec_tokens)
     route64 = Route64Client(config.route64_key, config.route64_url)
@@ -268,7 +271,7 @@ def create_account() -> Dict:
 
     desec.create_rrsets(rrsets)
 
-    # PTR é opcional – nunca derruba o processo
+    # PTR (não bloqueia se falhar)
     route64.create_ptr(IPV6, FULL_DOMAIN)
 
     account = {
@@ -365,7 +368,14 @@ async def send_email(account: Dict, to_addr: str) -> str:
     )
 
     try:
-        smtp = aiosmtplib.SMTP(hostname=config.kumomta_host, port=config.kumomta_port, timeout=40)
+        smtp = aiosmtplib.SMTP(
+            hostname=config.kumomta_host,
+            port=config.kumomta_port,
+            timeout=40,
+            use_tls=False,
+            start_tls=False,
+            validate_certs=False,
+        )
         await smtp.connect()
         await smtp.sendmail(account["address"], [to_addr], signed)
         await smtp.quit()
@@ -396,8 +406,8 @@ async def main():
 
         if args.provision or args.full:
             account = create_account()
-            logger.info("Aguardando 20 segundos para propagação DNS…")
-            time.sleep(20)
+            logger.info("Aguardando 25 segundos para propagação DNS…")
+            time.sleep(25)
 
         if args.send or args.full:
             if account is None:
