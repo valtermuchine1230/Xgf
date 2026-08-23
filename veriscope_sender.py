@@ -6,7 +6,10 @@ Envia e-mails reais para:
   - Macuacuavalter71@gmail.com
   - Info1yenom@gmail.com
 
-Repositório de estado: Valter3B/veriscope_checkpoints
+Uso:
+  python veriscope.py --provision
+  python veriscope.py --send
+  python veriscope.py --full
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import json
 import time
 import hashlib
 import logging
+import argparse
 import secrets
 from pathlib import Path
 from datetime import datetime, timezone
@@ -25,7 +29,6 @@ from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
 
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
 from huggingface_hub import HfApi
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -35,7 +38,7 @@ import aiosmtplib
 import asyncio
 
 # ---------------------------------------------------------------------------
-# Logging detalhado
+# Logging
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -68,7 +71,7 @@ class Config:
         self.kumomta_port = int(os.getenv("KUMOMTA_PORT", "2525"))
         self.from_name = os.getenv("KUMOMTA_FROM_NAME", "Alex | Liquidity Alert")
 
-        # E-mails de teste hardcoded (como pediste)
+        # Destinatários de teste (hardcoded como pediste)
         self.target_emails = [
             "Macuacuavalter71@gmail.com",
             "Info1yenom@gmail.com",
@@ -76,6 +79,7 @@ class Config:
 
         self.data_dir = Path("data")
         self.data_dir.mkdir(exist_ok=True)
+        self.account_file = self.data_dir / "account.json"
 
         self._validate()
 
@@ -94,15 +98,14 @@ class Config:
             msg = (
                 f"FALHA CRÍTICA DE CONFIGURAÇÃO\n"
                 f"Variáveis em falta: {', '.join(missing)}\n"
-                f"Verifique os GitHub Secrets e tente novamente."
+                f"Verifique os GitHub Secrets."
             )
             logger.error(msg)
             raise SystemExit(1)
 
         logger.info(
-            f"Configuração OK | domínio={self.desec_domain} | "
-            f"tokens deSEC={len(self.desec_tokens)} | "
-            f"destinatários={len(self.target_emails)}"
+            f"Config OK | domínio={self.desec_domain} | "
+            f"tokens={len(self.desec_tokens)} | destinatários={len(self.target_emails)}"
         )
 
 config = Config()
@@ -113,7 +116,7 @@ config = Config()
 class VeriscopeError(Exception):
     def __init__(self, message: str, **context):
         self.context = context
-        full = f"{message}"
+        full = message
         if context:
             full += " | " + " | ".join(f"{k}={v}" for k, v in context.items())
         super().__init__(full)
@@ -136,7 +139,6 @@ class DesecClient:
         return t
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
-        # Rate limit conservador
         elapsed = time.time() - self.last_call
         if elapsed < 1.0:
             time.sleep(1.0 - elapsed)
@@ -152,7 +154,7 @@ class DesecClient:
 
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", 60))
-                logger.warning(f"deSEC 429 Too Many Requests → aguardando {wait}s")
+                logger.warning(f"deSEC 429 → aguardando {wait}s")
                 time.sleep(wait + 2)
                 return self._request(method, path, **kwargs)
 
@@ -190,7 +192,6 @@ class Route64Client:
         }
         payload = {"ip": ipv6, "hostname": hostname}
 
-        # Tenta create
         resp = self.session.post(
             f"{self.base}/rdns/create/",
             headers=headers,
@@ -199,7 +200,6 @@ class Route64Client:
         )
 
         if resp.status_code not in (200, 201):
-            # Fallback PUT
             resp = self.session.put(
                 f"{self.base}/rdns/{ipv6}/",
                 headers=headers,
@@ -238,7 +238,6 @@ class DKIMManager:
             format=serialization.PublicFormat.SubjectPublicKeyInfo,
         ).decode()
 
-        # Remover cabeçalhos PEM
         lines = [l for l in pub_pem.splitlines() if not l.startswith("-----")]
         pub_b64 = "".join(lines)
         return priv_pem, pub_b64
@@ -263,7 +262,7 @@ class DKIMManager:
             )
 
 # ---------------------------------------------------------------------------
-# Criação da conta única
+# Criação da conta
 # ---------------------------------------------------------------------------
 def create_one_account() -> Dict:
     logger.info("=== CRIANDO 1 CONTA SMTP REAL ===")
@@ -271,21 +270,16 @@ def create_one_account() -> Dict:
     desec = DesecClient(config.desec_tokens)
     route64 = Route64Client(config.route64_key, config.route64_url)
 
-    # Nome do sub-subdomínio
     sub = "mail01"
     full_domain = f"{sub}.{config.desec_domain}"
     address = f"alex@{full_domain}"
     selector = "s2026"
 
-    # Gerar chave DKIM
     priv_pem, pub_b64 = DKIMManager.generate()
     logger.info("Chave DKIM 2048-bit gerada")
 
-    # IPv6 dentro do bloco Route64
-    # Usamos um endereço fixo e previsível para este teste
     ipv6 = "2a11:6c7:f10:5::10"
 
-    # RRsets
     rrsets = [
         {
             "subname": sub,
@@ -313,14 +307,12 @@ def create_one_account() -> Dict:
         },
     ]
 
-    # Publicar no deSEC
     desec.create_rrsets(config.desec_domain, rrsets)
 
-    # PTR no Route64
     try:
         route64.create_ptr(ipv6, full_domain)
     except VeriscopeError as e:
-        logger.warning(f"PTR Route64 falhou (continua mesmo assim): {e}")
+        logger.warning(f"PTR Route64 falhou (continua): {e}")
 
     account = {
         "id": "email_0001",
@@ -333,15 +325,13 @@ def create_one_account() -> Dict:
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Guardar localmente
-    with open(config.data_dir / "account.json", "w") as f:
+    with open(config.account_file, "w") as f:
         json.dump(account, f, indent=2)
 
-    # Upload para HuggingFace
     try:
         api = HfApi(token=config.hf_token)
         api.upload_file(
-            path_or_fileobj=str(config.data_dir / "account.json"),
+            path_or_fileobj=str(config.account_file),
             path_in_repo="accounts/email_0001.json",
             repo_id=config.hf_repo,
             repo_type="dataset",
@@ -351,11 +341,11 @@ def create_one_account() -> Dict:
     except Exception as e:
         logger.warning(f"Upload HF falhou (não crítico): {e}")
 
-    logger.info(f"Conta criada com sucesso → {address}")
+    logger.info(f"Conta criada → {address}")
     return account
 
 # ---------------------------------------------------------------------------
-# Envio de e-mail
+# Envio
 # ---------------------------------------------------------------------------
 async def send_one_email(account: Dict, to_addr: str) -> str:
     logger.info(f"Enviando para {to_addr}…")
@@ -393,8 +383,6 @@ async def send_one_email(account: Dict, to_addr: str) -> str:
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     raw = msg.as_bytes()
-
-    # Assinar com DKIM
     signed = DKIMManager.sign(
         raw,
         domain=account["domain"],
@@ -423,46 +411,56 @@ async def send_one_email(account: Dict, to_addr: str) -> str:
 # Main
 # ---------------------------------------------------------------------------
 async def main():
-    logger.info("=" * 60)
-    logger.info("VERISCOPE – TESTE COMPLETO (1 conta → 2 emails)")
-    logger.info("=" * 60)
+    parser = argparse.ArgumentParser(description="Veriscope SMTP Engine - Teste")
+    parser.add_argument("--provision", action="store_true", help="Criar a conta SMTP")
+    parser.add_argument("--send", action="store_true", help="Enviar os e-mails de teste")
+    parser.add_argument("--full", action="store_true", help="Provision + Send")
+    args = parser.parse_args()
+
+    if not any([args.provision, args.send, args.full]):
+        parser.print_help()
+        sys.exit(0)
 
     try:
-        # 1. Criar a conta
-        account = create_one_account()
+        account = None
 
-        # 2. Aguardar um pouco para propagação DNS (opcional mas recomendado)
-        logger.info("Aguardando 15 segundos para propagação DNS…")
-        time.sleep(15)
+        if args.provision or args.full:
+            account = create_one_account()
+            logger.info("Aguardando 15s para propagação DNS…")
+            time.sleep(15)
 
-        # 3. Enviar para os dois e-mails
-        results = {}
-        for email in config.target_emails:
-            code = await send_one_email(account, email)
-            results[email] = code
-            time.sleep(3)  # Pequeno intervalo
+        if args.send or args.full:
+            if account is None:
+                if not config.account_file.exists():
+                    raise VeriscopeError("Conta não encontrada. Rode primeiro --provision")
+                with open(config.account_file) as f:
+                    account = json.load(f)
 
-        # 4. Resumo final
-        logger.info("=" * 60)
-        logger.info("RESUMO DO TESTE")
-        for email, code in results.items():
-            status = "SUCESSO" if code.startswith("250") else "FALHOU"
-            logger.info(f"  {email} → {code} ({status})")
-        logger.info("=" * 60)
+            results = {}
+            for email in config.target_emails:
+                code = await send_one_email(account, email)
+                results[email] = code
+                time.sleep(3)
 
-        # Guardar resultado
-        with open(config.data_dir / "test_result.json", "w") as f:
-            json.dump(
-                {
-                    "account": account["address"],
-                    "results": results,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                f,
-                indent=2,
-            )
+            logger.info("=" * 60)
+            logger.info("RESUMO DO ENVIO")
+            for email, code in results.items():
+                status = "SUCESSO" if str(code).startswith("250") else "FALHOU"
+                logger.info(f"  {email} → {code} ({status})")
+            logger.info("=" * 60)
 
-        logger.info("Teste concluído. Verifique as caixas de entrada (e a pasta de spam).")
+            with open(config.data_dir / "test_result.json", "w") as f:
+                json.dump(
+                    {
+                        "account": account["address"],
+                        "results": results,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                    f,
+                    indent=2,
+                )
+
+        logger.info("Processo concluído.")
 
     except VeriscopeError as e:
         logger.error(f"ERRO VERISCOPE: {e}")
