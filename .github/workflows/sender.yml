@@ -1,20 +1,15 @@
-name: Veriscope Test Sender (1 conta → 2 emails)
+name: Veriscope Test – 1 Conta Real
 
 on:
   workflow_dispatch:
 
-concurrency:
-  group: veriscope-test
-  cancel-in-progress: false
-
 jobs:
-  test-send:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -50,15 +45,14 @@ jobs:
             -v $(pwd)/policy:/opt/kumomta/etc/policy \
             ghcr.io/kumocorp/kumomta:latest
 
-          sleep 10
-          docker ps | grep kumomta || (echo "ERRO: KumoMTA não iniciou" && docker logs kumomta && exit 1)
-          echo "KumoMTA a correr na porta 2525"
+          sleep 12
+          docker ps | grep kumomta || (echo "KumoMTA falhou" && docker logs kumomta && exit 1)
 
-      - name: Run Veriscope Sender (1 conta + 2 emails)
+      - name: Run Veriscope (cria conta + envia)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: Valter3B/veriscope_checkpoints
-          DESEC_DOMAIN: ${{ secrets.DESEC_DOMAIN }}
+          DESEC_DOMAIN: veriscope0.dedyn.io
           DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
           DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
           DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
@@ -90,8 +84,8 @@ jobs:
           ROUTE64_IPV6_BLOCK: ${{ secrets.ROUTE64_IPV6_BLOCK }}
           KUMOMTA_HOST: 127.0.0.1
           KUMOMTA_PORT: 2525
-          KUMOMTA_FROM_NAME: ${{ secrets.KUMOMTA_FROM_NAME }}
-        run: python veriscope_sender.py
+          KUMOMTA_FROM_NAME: Alex | Veriscope
+        run: python veriscope_sender.py --full
 
       - name: Upload logs
         if: always()
