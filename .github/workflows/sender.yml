@@ -1,87 +1,33 @@
-name: 🧪 Teste de Provisão & Envio
+name: Teste de Entregabilidade SMTP
 
 on:
   workflow_dispatch:
-    inputs:
-      skip_provision:
-        description: 'Skip provisioning (use existing account)?'
-        required: false
-        default: 'false'
 
 jobs:
-  test-provision-and-send:
+  test_sending:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
     steps:
-      - name: 📥 Checkout repository
+      - name: Checkout do Repositório
         uses: actions/checkout@v4
-      
-      - name: 🐍 Setup Python 3.10
+
+      - name: Configurar Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      
-      - name: 📦 Instalar dependências
+          python-version: "3.10"
+
+      - name: Instalar Dependências do Sistema (Postfix/MTA)
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix wireguard-tools
+          sudo service postfix start
+
+      - name: Instalar Dependências Python
         run: |
           python -m pip install --upgrade pip
-          pip install \
-            huggingface-hub==0.19.4 \
-            cryptography==41.0.7 \
-            dkimpy==1.1.8 \
-            requests==2.31.0 \
-            python-dotenv==1.0.0 \
-            email-validator==2.1.0 \
-            dnspython==2.4.2
-      
-      - name: 🔑 Provisionar conta única (sub0.veriscope0.dedyn.io)
-        if: github.event.inputs.skip_provision != 'true'
+          pip install requests dkimpy cryptography dnspython
+
+      - name: Executar Teste de Envio SMTP
         env:
-          DESEC_DOMAIN: ${{ secrets.DESEC_DOMAIN }}
-          DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
           ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
-          ROUTE64_API_URL: ${{ secrets.ROUTE64_API_URL }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ secrets.HF_REPO }}
-          KUMOMTA_HOST: ${{ secrets.KUMOMTA_HOST }}
-          KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
         run: |
-          python provision_single_account.py
-        continue-on-error: true
-      
-      - name: ⏳ Aguardando propagação DNS (30 segundos)
-        run: sleep 30
-      
-      - name: 🔍 Validar registos DNS
-        run: |
-          echo "Verificando SPF para sub0.veriscope0.dedyn.io..."
-          nslookup -type=TXT sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
-          
-          echo "Verificando DKIM para s2026.sub0.veriscope0.dedyn.io..."
-          nslookup -type=TXT s2026.sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
-          
-          echo "Verificando DMARC para _dmarc.sub0.veriscope0.dedyn.io..."
-          nslookup -type=TXT _dmarc.sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
-        continue-on-error: true
-      
-      - name: 📧 Enviar emails de teste
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ secrets.HF_REPO }}
-          KUMOMTA_HOST: ${{ secrets.KUMOMTA_HOST }}
-          KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
-        run: |
-          python send_test.py
-      
-      - name: 📊 Gerar relatório
-        run: |
-          echo "✓ Teste concluído!"
-      
-      - name: 📤 Upload logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-logs
-          path: |
-            *.log
-        continue-on-error: true
+          python teste_envio.py
