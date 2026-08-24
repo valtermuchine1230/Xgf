@@ -2,20 +2,22 @@ import os
 import sys
 import time
 import requests
-import smtplib
 import dkim
+import smtplib
+import urllib.parse
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.header import Header
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
 
-# --- CONFIGURAÇÕES ---
-DESEC_TOKEN = "M7EZnMkjgErWvgFRwMtFi2DD9vbB"
-DOMAIN_BASE = "veriscope.dedyn.io"
+# ==========================================
+# CONFIGURAÇÕES E CHAVES
+# ==========================================
+ROUTE64_API_KEY = os.getenv("ROUTE64_API_KEY", "I7ACbK9fsRD5ZNCHvD7FtjcoOYmhgz1MNTyh3rxgdFc")
+ROUTE64_IPV6 = "2a11:6c7:f10:5::2"
+DOMAIN = "veriscope.dedyn.io"
 SUBDOMAIN = "sub.veriscope.dedyn.io"
-SENDER_EMAIL = "alex@sub.veriscope.dedyn.io"
-SENDER_NAME = "Alex | Liquidity Alert"
+
+# Token extraído do painel deSEC
+DESEC_TOKEN = os.getenv("DESEC_TOKEN", "NGRQaMUdKpxor1EArnfYdxpGgPSb")
 
 RECIPIENTS = [
     "macuacuavalter71@gmail.com",
@@ -25,153 +27,116 @@ RECIPIENTS = [
     "Info1yenom@gmail.com"
 ]
 
-ROUTE64_API_KEY = os.environ.get("ROUTE64_API_KEY")
-ROUTE64_IPV6_RAW = os.environ.get("ROUTE64_IPV6", "")
-ROUTE64_IPV6 = ROUTE64_IPV6_RAW.split("/")[0] if ROUTE64_IPV6_RAW else ""
-
-def log(tag, msg, success=True):
-    icon = "✓" if success else "✗"
-    print(f"[{icon}] [{tag}] {msg}")
-
-# --- STEP 1: CONFIGURAR rDNS NA ROUTE64 ---
-def setup_route64_rdns():
-    print("\n--- 🌐 STEP 1: CONFIGURANDO rDNS NA ROUTE64 ---")
-    if not ROUTE64_API_KEY or not ROUTE64_IPV6:
-        log("ROUTE64", "ROUTE64_API_KEY ou ROUTE64_IPV6 não configuradas corretamente.", False)
-        return
-
-    headers = {
+print("--- 🌐 STEP 1: CONFIGURANDO rDNS NA ROUTE64 ---")
+try:
+    # A API oficial do Route64 exige percent-encoding do IPv6 na URL (manager.route64.org)
+    encoded_ipv6 = urllib.parse.quote(ROUTE64_IPV6)
+    url_rdns = f"https://manager.route64.org/api/rdns/{encoded_ipv6}/"
+    
+    headers_r64 = {
         "Authorization": f"Bearer {ROUTE64_API_KEY}",
         "Content-Type": "application/json"
     }
-    url = f"https://manager.route64.org/api/rdns/{ROUTE64_IPV6}"
-    payload = {"hostname": SUBDOMAIN}
-    
-    try:
-        res = requests.put(url, json=payload, headers=headers, timeout=10)
-        if res.status_code in [200, 201, 204]:
-            log("ROUTE64", f"rDNS atualizado com sucesso! IP: {ROUTE64_IPV6} -> {SUBDOMAIN}")
-        else:
-            # Se PUT falhar, tenta via POST create
-            res_post = requests.post("https://manager.route64.org/api/rdns/create", json={"ip": ROUTE64_IPV6, "hostname": SUBDOMAIN}, headers=headers, timeout=10)
-            log("ROUTE64", f"Resposta criação rDNS: HTTP {res_post.status_code} - {res_post.text}")
-    except Exception as e:
-        log("ROUTE64", f"Erro na requisição à API Route64: {str(e)}", False)
+    payload_r64 = {"rdns": SUBDOMAIN}
 
-# --- STEP 2: GERAR CHAVES DKIM ---
-def generate_dkim_keys():
-    print("\n--- 🔑 STEP 2: GERANDO CHAVE DKIM RSA 2048 ---")
+    res = requests.put(url_rdns, json=payload_r64, headers=headers_r64, timeout=10)
+    print(f"[✓] [ROUTE64] Configuração rDNS ({ROUTE64_IPV6} -> {SUBDOMAIN}): Status {res.status_code}")
+    if res.status_code not in [200, 201, 204]:
+        print(f"    Detalhes Route64: {res.text}")
+except Exception as e:
+    print(f"[✗] [ROUTE64] Erro na requisição rDNS: {e}")
+
+print("\n--- 🔑 STEP 2: GERANDO CHAVE DKIM RSA 2048 ---")
+try:
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem_private = private_key.private_bytes(
+    private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.TraditionalOpenSSL,
         encryption_algorithm=serialization.NoEncryption()
-    ).decode('utf-8')
-    
+    )
     public_key = private_key.public_key()
-    der_public = public_key.public_bytes(
-        encoding=serialization.Encoding.DER,
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-    import base64
-    pub_b64 = base64.b64encode(der_public).decode('utf-8')
-    log("DKIM", "Par de chaves gerado com sucesso!")
-    return pem_private, pub_b64
 
-# --- STEP 3: PUBLICAR REGISTOS SPF, DKIM E DMARC NO DESEC ---
-def setup_desec_dns(pub_b64_key):
-    print("\n--- 📡 STEP 3: ATUALIZANDO DNS NO DESEC ---")
-    headers = {
-        "Authorization": f"Token {DESEC_TOKEN}",
-        "Content-Type": "application/json",
+    pub_lines = public_pem.decode('utf-8').splitlines()[1:-1]
+    pub_base64 = "".join(pub_lines)
+    print("[✓] [DKIM] Par de chaves gerado com sucesso!")
+except Exception as e:
+    print(f"[✗] [DKIM] Erro ao gerar chaves: {e}")
+    sys.exit(1)
+
+print("\n--- 📡 STEP 3: ATUALIZANDO DNS NO DESEC ---")
+desec_headers = {
+    "Authorization": f"Token {DESEC_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+def update_desec_rrset(subname, record_type, records_list):
+    # Endpoint da API REST deSEC conforme documentacao readthedocs
+    url = f"https://desec.io/api/v1/domains/{DOMAIN}/rrsets/"
+    
+    # Formatação exata do payload deSEC para registos TXT
+    formatted_records = [f'"{r}"' if not r.startswith('"') else r for r in records_list]
+    
+    payload = {
+        "subname": subname,
+        "type": record_type,
+        "ttl": 3600,
+        "records": formatted_records
     }
     
-    # Inclui o IPv6 da Route64 explicitamente no SPF
-    spf_val = f'"v=spf1 ip6:{ROUTE64_IPV6} a mx ~all"' if ROUTE64_IPV6 else '"v=spf1 a mx ~all"'
-    
-    records = [
-        {"subdomain": "sub", "type": "TXT", "ttl": 3600, "records": [spf_val]},
-        {"subdomain": "default._domainkey.sub", "type": "TXT", "ttl": 3600, "records": [f'"v=DKIM1; k=rsa; p={pub_b64_key}"']},
-        {"subdomain": "_dmarc.sub", "type": "TXT", "ttl": 3600, "records": ['"v=DMARC1; p=none; sp=none; pct=100;"']}
-    ]
-    
-    for rr in records:
-        url = f"https://desec.io/api/v1/domains/{DOMAIN_BASE}/rrsets/"
-        payload = {"subdomain": rr["subdomain"], "type": rr["type"], "ttl": rr["ttl"], "records": rr["records"]}
-        res = requests.post(url, json=payload, headers=headers)
-        if res.status_code in [200, 201]:
-            log("deSEC", f"Registo {rr['type']} adicionado para '{rr['subdomain']}'")
-        else:
-            patch_url = f"{url}{rr['subdomain']}/{rr['type']}/"
-            patch_res = requests.patch(patch_url, json={"records": rr["records"]}, headers=headers)
-            if patch_res.status_code in [200, 204]:
-                log("deSEC", f"Registo {rr['type']} atualizado para '{rr['subdomain']}'")
-            else:
-                log("deSEC", f"Erro no registo {rr['type']}: {patch_res.text}", False)
+    # Tenta criar via POST; se já existir, faz update com PUT no RRset específico
+    r = requests.post(url, json=payload, headers=desec_headers, timeout=10)
+    if r.status_code == 409: # Recordset ja existe
+        rrset_url = f"{url}{subname}/{record_type}/"
+        r = requests.put(rrset_url, json=payload, headers=desec_headers, timeout=10)
+        
+    if r.status_code in [200, 201]:
+        print(f"[✓] [deSEC] Registado {record_type} em ({subname}.{DOMAIN}) com sucesso!")
+    else:
+        print(f"[✗] [deSEC] Erro no registo {record_type} ({subname}): HTTP {r.status_code} - {r.text}")
 
-# --- STEP 4: ENVIO SMTP ASSINADO COM LOGO VERISCOPE ---
-def send_test_emails(private_key_pem):
-    print("\n--- ✉️ STEP 4: DISPARANDO E-MAILS ---")
-    subject = "Liquidity Alert: Atualização de Mercado Veriscope"
-    
-    # Template HTML em Dark Mode com a marca Veriscope
-    html_content = """\
-    <!DOCTYPE html>
-    <html>
-      <body style="background-color: #000000; color: #ffffff; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; margin: 0;">
-        <div style="max-width: 600px; margin: 0 auto; background-color: #0a0a0a; border: 1px solid #222222; border-radius: 8px; padding: 30px;">
-          <div style="text-align: center; margin-bottom: 30px;">
-            <h1 style="color: #d4af37; font-size: 24px; letter-spacing: 2px; margin: 0;">VERISCOPE</h1>
-            <p style="color: #888888; font-size: 12px; margin-top: 5px;">INTELLIGENCE & MARKET EDGE</p>
-          </div>
-          <hr style="border: 0; border-top: 1px solid #222222; margin: 20px 0;"/>
-          <h2 style="color: #ffffff; font-size: 18px;">Alerta de Liquidez Detectado</h2>
-          <p style="color: #cccccc; line-height: 1.6;">Este é um e-mail de teste de verificação de entregabilidade direta na Caixa de Entrada (Inbox) utilizando a infraestrutura de rede da Route64 e deSEC.</p>
-          <div style="background-color: #141414; border-left: 3px solid #d4af37; padding: 15px; margin: 20px 0; border-radius: 4px;">
-            <p style="margin: 0; color: #d4af37; font-weight: bold;">Remetente:</p>
-            <p style="margin: 5px 0 0 0; color: #ffffff;">Alex | Liquidity Alert &lt;alex@sub.veriscope.dedyn.io&gt;</p>
-          </div>
-          <p style="color: #888888; font-size: 12px; text-align: center; margin-top: 30px;">
-            © 2026 Veriscope. Todos os direitos reservados.
-          </p>
-        </div>
-      </body>
-    </html>
-    """
+# 1. Registro SPF
+update_desec_rrset("sub", "TXT", [f"v=spf1 ip6:{ROUTE64_IPV6} ~all"])
 
-    for recipient in RECIPIENTS:
-        msg = MIMEMultipart("alternative")
-        msg["From"] = f"{Header(SENDER_NAME, 'utf-8')} <{SENDER_EMAIL}>"
-        msg["To"] = recipient
-        msg["Subject"] = Header(subject, "utf-8")
-        msg.attach(MIMEText(html_content, "html", "utf-8"))
+# 2. Registro DKIM
+update_desec_rrset("default._domainkey.sub", "TXT", [f"v=DKIM1; k=rsa; p={pub_base64}"])
 
-        try:
-            sig = dkim.sign(
-                message=msg.as_bytes(),
-                selector=b"default",
-                domain=SUBDOMAIN.encode('utf-8'),
-                privkey=private_key_pem.encode('utf-8'),
-                include_headers=[b"From", b"To", b"Subject"]
-            )
-            raw_msg = sig + msg.as_bytes()
-        except Exception as e:
-            log("DKIM", f"Falha ao assinar para {recipient}: {str(e)}", False)
-            continue
+# 3. Registro DMARC
+update_desec_rrset("_dmarc.sub", "TXT", ["v=DMARC1; p=none; sp=none; pct=100"])
 
-        try:
-            with smtplib.SMTP("localhost", 25) as server:
-                server.sendmail(SENDER_EMAIL, [recipient], raw_msg)
-            log("SMTP", f"Mensagem entregue ao Postfix local para: {recipient}")
-        except Exception as e:
-            log("SMTP", f"Erro no envio SMTP para {recipient}: {str(e)}", False)
+print("\n⏳ Aguardando 10 segundos para propagação do DNS...")
+time.sleep(10)
 
-if __name__ == "__main__":
-    setup_route64_rdns()
-    priv_key, pub_key_b64 = generate_dkim_keys()
-    setup_desec_dns(pub_key_b64)
-    
-    print("\n⏳ Aguardando 10 segundos para propagação do DNS...")
-    time.sleep(10)
-    
-    send_test_emails(priv_key)
+print("\n--- ✉️ STEP 4: DISPARANDO E-MAILS ---")
+for recipient in RECIPIENTS:
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"Alex <alex@{SUBDOMAIN}>"
+    msg["To"] = recipient
+    msg["Subject"] = "Teste de Entregabilidade Veriscope"
+    msg["Message-ID"] = f"<{time.time()}@{SUBDOMAIN}>"
+
+    body = "E-mail de teste enviado via Postfix + Route64 WireGuard + deSEC DNS."
+    msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    # Assinar via DKIM
+    sig = dkim.sign(
+        message=msg.as_bytes(),
+        selector=b"default",
+        domain=SUBDOMAIN.encode('utf-8'),
+        privkey=private_pem,
+        include_headers=[b"From", b"To", b"Subject", b"Message-ID"]
+    )
+    msg_signed = sig + msg.as_bytes()
+
+    try:
+        with smtplib.SMTP("127.0.0.1", 25) as server:
+            server.sendmail(f"alex@{SUBDOMAIN}", [recipient], msg_signed)
+            print(f"[✓] [SMTP] Mensagem entregue ao Postfix local para: {recipient}")
+    except Exception as e:
+        print(f"[✗] [SMTP] Erro ao enviar para {recipient}: {e}")
