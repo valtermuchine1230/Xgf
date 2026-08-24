@@ -23,7 +23,7 @@ jobs:
       - name: Configurar e Subir Túnel WireGuard (Route64)
         run: |
           sudo python3 -c "
-          import os, sys
+          import os
 
           key = 'EGCw9w3aHzxnN4w4rcK8k4ayCefIVKLzXpN3ag+Lh30='
           ip = '2a11:6c7:f10:5::2/64, 100.64.200.166/30'
@@ -48,8 +48,8 @@ jobs:
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
           
-          # Força o roteamento IPv6 de saída a passar obrigatoriamente pela interface wg0
-          sudo ip -6 route replace default dev wg0
+          # Adiciona apenas a rota necessária para a sub-rede sem alterar a rota padrao da internet
+          sudo ip -6 route add 2a11:6c7:f10:5::/64 dev wg0 || true
           
           echo "=== INTERFACE WIREGUARD ATIVA ==="
           sudo wg show
