@@ -29,7 +29,6 @@ jobs:
           ip = '2a11:6c7:f10:5::2/64, 100.64.200.166/30'
           endpoint = '148.59.165.6:20011'
 
-          # Chave Publica corrigida conforme o arquivo .conf original
           conf = f'''[Interface]
           PrivateKey = {key}
           Address = {ip}
@@ -48,17 +47,18 @@ jobs:
           "
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
-
-          # Adiciona a rota IPv6 global apontando exclusivamente para a wg0
-          sudo ip -6 route add default dev wg0 metric 100 || true
+          
+          # Associa o roteamento IPv6 diretamente à interface wg0
+          sudo ip -6 route add default dev wg0 metric 1024 || true
           
           echo "=== INTERFACE WIREGUARD ATIVA ==="
           sudo wg show
 
-      - name: Validar Conectividade IPv6 do Túnel
+      - name: Testar Conectividade do Túnel WireGuard
         run: |
-          echo "Testando comunicacao IPv6 da Route64..."
-          ping6 -c 3 -I wg0 2607:f8b0:4004:800::200e || echo "AVISO: Sem resposta de ping6"
+          echo "--- PING NO GATEWAY ROUTE64 ---"
+          ping6 -c 3 2a11:6c7:f10:5::1 || true
+          ping -c 3 100.64.200.165 || true
 
       - name: Configurar Postfix para IPv6 Route64
         run: |
