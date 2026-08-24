@@ -78,7 +78,8 @@ desec_headers = {
 }
 
 def update_desec_rrset(subname, record_type, records_list):
-    url = f"https://desec.io/api/v1/domains/{DOMAIN}/rrsets/"
+    # Endpoint do RRset específico para atualização direta
+    url_specific = f"https://desec.io/api/v1/domains/{DOMAIN}/rrsets/{subname}/{record_type}/"
     formatted_records = [f'"{r}"' if not r.startswith('"') else r for r in records_list]
     
     payload = {
@@ -88,17 +89,23 @@ def update_desec_rrset(subname, record_type, records_list):
         "records": formatted_records
     }
     
-    r = requests.post(url, json=payload, headers=desec_headers, timeout=10)
-    if r.status_code == 409:
-        rrset_url = f"{url}{subname}/{record_type}/"
-        r = requests.put(rrset_url, json=payload, headers=desec_headers, timeout=10)
+    # Atualiza registro existente via PUT
+    r = requests.put(url_specific, json=payload, headers=desec_headers, timeout=10)
+    
+    # Se o registro não existir, cria no endpoint geral
+    if r.status_code == 404:
+        url_general = f"https://desec.io/api/v1/domains/{DOMAIN}/rrsets/"
+        r = requests.post(url_general, json=payload, headers=desec_headers, timeout=10)
         
     if r.status_code in [200, 201]:
         print(f"[✓] [deSEC] Registado {record_type} em ({subname}.{DOMAIN}) com sucesso!")
     else:
         print(f"[✗] [deSEC] Erro no registo {record_type} ({subname}): HTTP {r.status_code} - {r.text}")
+    
+    # Intervalo para evitar HTTP 429 (Rate Limit)
+    time.sleep(1.5)
 
-# Registos DNS essenciais
+# Atualização dos registros no deSEC
 update_desec_rrset("sub", "TXT", [f"v=spf1 ip6:{ROUTE64_IPV6} ~all"])
 update_desec_rrset("default._domainkey.sub", "TXT", [f"v=DKIM1; k=rsa; p={pub_base64}"])
 update_desec_rrset("_dmarc.sub", "TXT", ["v=DMARC1; p=none; sp=none; pct=100"])
@@ -128,7 +135,6 @@ for recipient in RECIPIENTS:
     msg_signed = sig + msg.as_bytes()
 
     try:
-        # Conecta no IP de loopback IPv4
         with smtplib.SMTP("127.0.0.1", 25, timeout=15) as server:
             server.sendmail(f"alex@{SUBDOMAIN}", [recipient], msg_signed)
             print(f"[✓] [SMTP] Mensagem entregue ao Postfix local para: {recipient}")
