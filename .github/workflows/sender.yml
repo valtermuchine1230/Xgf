@@ -18,7 +18,7 @@ jobs:
       - name: Instalar Dependências do Sistema
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils wireguard-tools resolvconf
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils wireguard-tools resolvconf net-tools
 
       - name: Configurar e Subir Túnel WireGuard (Route64)
         run: |
@@ -48,30 +48,28 @@ jobs:
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
           
-          # Associa o roteamento IPv6 diretamente à interface wg0
+          # Adiciona rota global IPv6 usando a interface wg0
           sudo ip -6 route add default dev wg0 metric 1024 || true
           
           echo "=== INTERFACE WIREGUARD ATIVA ==="
           sudo wg show
 
-      - name: Testar Conectividade do Túnel WireGuard
-        run: |
-          echo "--- PING NO GATEWAY ROUTE64 ---"
-          ping6 -c 3 2a11:6c7:f10:5::1 || true
-          ping -c 3 100.64.200.165 || true
-
-      - name: Configurar Postfix para IPv6 Route64
+      - name: Configurar e Iniciar Postfix
         run: |
           IPV6_ADDR="2a11:6c7:f10:5::2"
           
+          # Configura Postfix para escutar localmente em IPv4/IPv6 e enviar usando o IPv6 da Route64
           sudo postconf -e "myhostname = sub.veriscope.dedyn.io"
           sudo postconf -e "mydomain = veriscope.dedyn.io"
           sudo postconf -e "myorigin = sub.veriscope.dedyn.io"
           sudo postconf -e "inet_interfaces = all"
-          sudo postconf -e "inet_protocols = ipv6"
+          sudo postconf -e "inet_protocols = all"
           sudo postconf -e "smtp_bind_address6 = $IPV6_ADDR"
           
+          # Reinicia e valida se a porta 25 está aberta em 127.0.0.1
           sudo service postfix restart
+          sleep 2
+          sudo netstat -tlpn | grep :25 || sudo ss -tlpn | grep :25
 
       - name: Instalar Libs Python
         run: |
