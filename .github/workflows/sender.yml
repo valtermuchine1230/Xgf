@@ -25,9 +25,8 @@ jobs:
           sudo python3 -c "
           import os, sys
 
-          # Chave cravada diretamente sem ler das secrets do GitHub
-          key = 'EGCw9w3aHzxnMw4rcK8k4ayCefIVKLzXpN3ag+Lh3O='
-          ip = '2a11:6c7:f10:5::2/64'
+          key = 'EGCw9w3aHzxnN4w4rcK8k4ayCefIVKLzXpN3ag+Lh30='
+          ip = '2a11:6c7:f10:5::2/64, 100.64.200.166/30'
           endpoint = '148.59.165.6:20011'
 
           print(f'-> Tamanho da Chave Harcoded: {len(key)} caracteres')
@@ -38,7 +37,7 @@ jobs:
 
           [Peer]
           PublicKey = dVQRQ7jk/5yGB6/d0HJdh+YYfICj3wUz6EQqhXnOz1A=
-          AllowedIPs = ::/0
+          AllowedIPs = 0.0.0.0/0, ::/0
           Endpoint = {endpoint}
           PersistentKeepalive = 15
           '''
