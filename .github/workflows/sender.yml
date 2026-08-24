@@ -29,7 +29,6 @@ jobs:
           ip = '2a11:6c7:f10:5::2/64, 100.64.200.166/30'
           endpoint = '148.59.165.6:20011'
 
-          # Restringir AllowedIPs evita o sequestro da rota padrao do runner do GitHub
           conf = f'''[Interface]
           PrivateKey = {key}
           Address = {ip}
@@ -37,7 +36,7 @@ jobs:
 
           [Peer]
           PublicKey = dVQRQ7jk/5yGB6/d0HJdh+YYfICj3wUz6EQqhXnOz1A=
-          AllowedIPs = 2a11:6c7:f10:5::/64, 100.64.200.164/30
+          AllowedIPs = ::/0, 0.0.0.0/0
           Endpoint = {endpoint}
           PersistentKeepalive = 15
           '''
@@ -49,8 +48,8 @@ jobs:
           sudo chmod 600 /etc/wireguard/wg0.conf
           sudo wg-quick up wg0
           
-          # Adicionar rota especifica IPv6 para o tunel sem afetar a internet do runner
-          sudo ip -6 route add 2a11:6c7:f10:5::/64 dev wg0 || true
+          # Força o roteamento IPv6 de saída a passar obrigatoriamente pela interface wg0
+          sudo ip -6 route replace default dev wg0
           
           echo "=== INTERFACE WIREGUARD ATIVA ==="
           sudo wg show
@@ -77,6 +76,7 @@ jobs:
         env:
           ROUTE64_API_KEY: "I7ACbK9fsRD5ZNCHvD7FtjcoOYmhgz1MNTyh3rxgdFc"
           ROUTE64_IPV6: "2a11:6c7:f10:5::2/64"
+          DESEC_TOKEN: "NGRQaMUdKpxor1EArnfYdxpGgPSb"
         run: |
           python teste_envio.py
 
