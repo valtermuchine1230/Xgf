@@ -31,7 +31,8 @@ jobs:
             dkimpy==1.1.8 \
             requests==2.31.0 \
             python-dotenv==1.0.0 \
-            email-validator==2.1.0
+            email-validator==2.1.0 \
+            dnspython==2.4.2
       
       - name: 🔑 Provisionar conta única (sub0.veriscope0.dedyn.io)
         if: github.event.inputs.skip_provision != 'true'
@@ -75,20 +76,6 @@ jobs:
       - name: 📊 Gerar relatório
         run: |
           echo "✓ Teste concluído!"
-          echo ""
-          echo "📌 PRÓXIMOS PASSOS:"
-          echo "1. Verifique os emails de teste:"
-          echo "   - macuacuavalter71@gmail.com"
-          echo "   - Info1yenom@gmail.com"
-          echo ""
-          echo "2. Valide:"
-          echo "   ✓ Chegaram à caixa de entrada"
-          echo "   ✓ SPF/DKIM/DMARC passaram"
-          echo "   ✓ Links funcionam"
-          echo "   ✓ Imagens carregaram"
-          echo ""
-          echo "3. Se OK, execute a campanha real:"
-          echo "   $ python enviador_smtp.py (para 30M leads)"
       
       - name: 📤 Upload logs
         if: failure()
@@ -97,6 +84,4 @@ jobs:
           name: test-logs
           path: |
             *.log
-            provision_single_account.log
-            send_test.log
         continue-on-error: true
