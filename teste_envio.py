@@ -9,14 +9,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # ==========================================
-# CONFIGURAÇÕES E CHAVES
+# CONFIGURAÇÕES E VARIÁVEIS
 # ==========================================
 ROUTE64_API_KEY = os.getenv("ROUTE64_API_KEY", "I7ACbK9fsRD5ZNCHvD7FtjcoOYmhgz1MNTyh3rxgdFc")
 ROUTE64_IPV6 = "2a11:6c7:f10:5::2"
 DOMAIN = "veriscope.dedyn.io"
 SUBDOMAIN = "sub.veriscope.dedyn.io"
 
-# Token extraído do painel deSEC
 DESEC_TOKEN = os.getenv("DESEC_TOKEN", "NGRQaMUdKpxor1EArnfYdxpGgPSb")
 
 RECIPIENTS = [
@@ -29,7 +28,6 @@ RECIPIENTS = [
 
 print("--- 🌐 STEP 1: CONFIGURANDO rDNS NA ROUTE64 ---")
 try:
-    # A API oficial do Route64 exige percent-encoding do IPv6 na URL (manager.route64.org)
     encoded_ipv6 = urllib.parse.quote(ROUTE64_IPV6)
     url_rdns = f"https://manager.route64.org/api/rdns/{encoded_ipv6}/"
     
@@ -40,11 +38,14 @@ try:
     payload_r64 = {"rdns": SUBDOMAIN}
 
     res = requests.put(url_rdns, json=payload_r64, headers=headers_r64, timeout=10)
-    print(f"[✓] [ROUTE64] Configuração rDNS ({ROUTE64_IPV6} -> {SUBDOMAIN}): Status {res.status_code}")
-    if res.status_code not in [200, 201, 204]:
-        print(f"    Detalhes Route64: {res.text}")
+    if res.status_code in [200, 201, 204]:
+        print(f"[✓] [ROUTE64] rDNS atualizado para {SUBDOMAIN}!")
+    elif res.status_code == 403:
+        print("[!] [ROUTE64] IP de interface sem suporte a rDNS via API (HTTP 403). Prosseguindo...")
+    else:
+        print(f"[!] [ROUTE64] Status {res.status_code}: {res.text}. Prosseguindo...")
 except Exception as e:
-    print(f"[✗] [ROUTE64] Erro na requisição rDNS: {e}")
+    print(f"[!] [ROUTE64] Exceção na requisição rDNS: {e}")
 
 print("\n--- 🔑 STEP 2: GERANDO CHAVE DKIM RSA 2048 ---")
 try:
@@ -65,9 +66,9 @@ try:
 
     pub_lines = public_pem.decode('utf-8').splitlines()[1:-1]
     pub_base64 = "".join(pub_lines)
-    print("[✓] [DKIM] Par de chaves gerado com sucesso!")
+    print("[✓] [DKIM] Par de chaves RSA 2048 gerado com sucesso!")
 except Exception as e:
-    print(f"[✗] [DKIM] Erro ao gerar chaves: {e}")
+    print(f"[✗] [DKIM] Erro crítico ao gerar chaves: {e}")
     sys.exit(1)
 
 print("\n--- 📡 STEP 3: ATUALIZANDO DNS NO DESEC ---")
@@ -77,10 +78,7 @@ desec_headers = {
 }
 
 def update_desec_rrset(subname, record_type, records_list):
-    # Endpoint da API REST deSEC conforme documentacao readthedocs
     url = f"https://desec.io/api/v1/domains/{DOMAIN}/rrsets/"
-    
-    # Formatação exata do payload deSEC para registos TXT
     formatted_records = [f'"{r}"' if not r.startswith('"') else r for r in records_list]
     
     payload = {
@@ -90,9 +88,8 @@ def update_desec_rrset(subname, record_type, records_list):
         "records": formatted_records
     }
     
-    # Tenta criar via POST; se já existir, faz update com PUT no RRset específico
     r = requests.post(url, json=payload, headers=desec_headers, timeout=10)
-    if r.status_code == 409: # Recordset ja existe
+    if r.status_code == 409:
         rrset_url = f"{url}{subname}/{record_type}/"
         r = requests.put(rrset_url, json=payload, headers=desec_headers, timeout=10)
         
@@ -101,13 +98,9 @@ def update_desec_rrset(subname, record_type, records_list):
     else:
         print(f"[✗] [deSEC] Erro no registo {record_type} ({subname}): HTTP {r.status_code} - {r.text}")
 
-# 1. Registro SPF
+# Registos DNS essenciais
 update_desec_rrset("sub", "TXT", [f"v=spf1 ip6:{ROUTE64_IPV6} ~all"])
-
-# 2. Registro DKIM
 update_desec_rrset("default._domainkey.sub", "TXT", [f"v=DKIM1; k=rsa; p={pub_base64}"])
-
-# 3. Registro DMARC
 update_desec_rrset("_dmarc.sub", "TXT", ["v=DMARC1; p=none; sp=none; pct=100"])
 
 print("\n⏳ Aguardando 10 segundos para propagação do DNS...")
@@ -121,10 +114,10 @@ for recipient in RECIPIENTS:
     msg["Subject"] = "Teste de Entregabilidade Veriscope"
     msg["Message-ID"] = f"<{time.time()}@{SUBDOMAIN}>"
 
-    body = "E-mail de teste enviado via Postfix + Route64 WireGuard + deSEC DNS."
+    body = "E-mail de teste enviado via Postfix local usando IPv6 da Route64 e registos autenticados via deSEC."
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    # Assinar via DKIM
+    # Assinatura DKIM
     sig = dkim.sign(
         message=msg.as_bytes(),
         selector=b"default",
@@ -135,7 +128,8 @@ for recipient in RECIPIENTS:
     msg_signed = sig + msg.as_bytes()
 
     try:
-        with smtplib.SMTP("127.0.0.1", 25) as server:
+        # Conecta no IP de loopback IPv4
+        with smtplib.SMTP("127.0.0.1", 25, timeout=15) as server:
             server.sendmail(f"alex@{SUBDOMAIN}", [recipient], msg_signed)
             print(f"[✓] [SMTP] Mensagem entregue ao Postfix local para: {recipient}")
     except Exception as e:
