@@ -21,35 +21,16 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils wireguard-tools resolvconf
 
       - name: Configurar e Subir Túnel WireGuard (Route64)
-        env:
-          WG_KEY: ${{ secrets.ROUTE64_WG_PRIVATE_KEY }}
-          WG_IP: ${{ secrets.ROUTE64_IPV6 }}
-          WG_END: ${{ secrets.ROUTE64_ENDPOINT }}
         run: |
-          sudo -E python3 -c "
+          sudo python3 -c "
           import os, sys
 
-          raw_key = os.environ.get('WG_KEY', '').strip()
-          
-          # Caso a secret venha vazia, usa o fallback do painel
-          if not raw_key:
-              raw_key = 'EGCw9w3aHzxnMw4rcK8k4ayCefIVKLzXpN3ag+Lh3O='
+          # Chave cravada diretamente sem ler das secrets do GitHub
+          key = 'EGCw9w3aHzxnMw4rcK8k4ayCefIVKLzXpN3ag+Lh3O='
+          ip = '2a11:6c7:f10:5::2/64'
+          endpoint = '148.59.165.6:20011'
 
-          # Corrige caracteres alterados pelo teclado do telemóvel
-          key = raw_key.replace(' ', '+').replace('-', '+').strip()
-          
-          # Se tiver 43 caracteres, adiciona o '=' final
-          if len(key) == 43 and not key.endswith('='):
-              key += '='
-
-          ip = os.environ.get('WG_IP', '2a11:6c7:f10:5::2/64').strip()
-          endpoint = os.environ.get('WG_END', '148.59.165.6:20011').strip()
-
-          print(f'-> Tamanho final da Chave Tratada: {len(key)} caracteres')
-
-          if len(key) != 44:
-              print(f'❌ ERRO CRÍTICO: Chave inválida ({len(key)} caracteres).')
-              sys.exit(1)
+          print(f'-> Tamanho da Chave Harcoded: {len(key)} caracteres')
 
           conf = f'''[Interface]
           PrivateKey = {key}
@@ -73,9 +54,7 @@ jobs:
 
       - name: Configurar Postfix para IPv6 Route64
         run: |
-          IPV6_RAW="${{ secrets.ROUTE64_IPV6 }}"
-          [ -z "$IPV6_RAW" ] && IPV6_RAW="2a11:6c7:f10:5::2/64"
-          IPV6_ADDR=$(echo "$IPV6_RAW" | cut -d'/' -f1)
+          IPV6_ADDR="2a11:6c7:f10:5::2"
           
           sudo postconf -e "myhostname = sub.veriscope.dedyn.io"
           sudo postconf -e "mydomain = veriscope.dedyn.io"
@@ -93,8 +72,8 @@ jobs:
 
       - name: Executar Disparo com Python
         env:
-          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
-          ROUTE64_IPV6: ${{ secrets.ROUTE64_IPV6 }}
+          ROUTE64_API_KEY: "I7ACbK9fsRD5ZNCHvD7FtjcoOYmhgz1MNTyh3rxgdFc"
+          ROUTE64_IPV6: "2a11:6c7:f10:5::2/64"
         run: |
           python teste_envio.py
 
