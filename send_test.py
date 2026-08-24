@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Envio de emails de teste via KumoMTA - VERSÃO CORRIGIDA
+send_test.py
+Envio de emails de teste via KumoMTA
 """
 
 import os
@@ -9,17 +10,13 @@ import logging
 import smtplib
 import hashlib
 import email.utils
-from pathlib import Path
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from huggingface_hub import hf_hub_download
 from dkimpy import sign
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 HF_TOKEN = os.getenv("HF_TOKEN")
@@ -30,7 +27,6 @@ TEST_RECIPIENTS = [
     "Info1yenom@gmail.com"
 ]
 
-# ⚠️ TEMPLATE CORRIGIDA - {{ }} escapado para {{{{ }}}}
 EMAIL_TEMPLATE_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -105,9 +101,7 @@ EMAIL_TEMPLATE_HTML = """<!DOCTYPE html>
 </html>"""
 
 def load_account_from_hf():
-    """Carrega dados da conta do HuggingFace"""
-    logger.info(f"Carregando conta do HF ({HF_REPO})...")
-    
+    logger.info(f"Carregando conta do HF...")
     if not HF_TOKEN:
         raise ValueError("HF_TOKEN não configurado")
     
@@ -126,26 +120,22 @@ def load_account_from_hf():
         return account
         
     except Exception as e:
-        logger.error(f"✗ Erro ao carregar conta do HF: {e}")
+        logger.error(f"✗ Erro ao carregar: {e}")
         raise
 
 def generate_tracking_hash(email, recipient):
-    """Gera hash único para rastreamento"""
     unique_str = f"{email}:{recipient}:{datetime.utcnow().isoformat()}"
     return hashlib.sha256(unique_str.encode()).hexdigest()[:16]
 
 def apply_mutation(html_content, tracking_hash, recipient_email, email_num):
-    """Aplica mutação ao HTML"""
     logger.info(f"  → Aplicando mutação para {recipient_email}...")
     
-    # Substituir placeholders
     content = html_content.format(
         tracking_hash=tracking_hash,
         recipient_email=recipient_email,
         email_number=email_num
     )
     
-    # Adicionar elemento DOM invisível
     rnd_class = f"rnd_{tracking_hash[:8]}"
     invisible_div = f'<div style="display:none;" class="{rnd_class}"><!-- {tracking_hash} --></div>'
     content = content.replace("</body>", f"{invisible_div}</body>")
@@ -153,8 +143,7 @@ def apply_mutation(html_content, tracking_hash, recipient_email, email_num):
     return content
 
 def sign_email_with_dkim(message, account):
-    """Assina email com DKIM"""
-    logger.info("  → Assinando com DKIM...")
+    logger.info("  → Assinando DKIM...")
     
     domain = account['full_domain'].encode('utf-8')
     selector = account['dkim_selector'].encode('utf-8')
@@ -172,16 +161,14 @@ def sign_email_with_dkim(message, account):
         )
         
         signed_message = sig + message.as_bytes()
-        
         logger.info("  ✓ DKIM assinado")
         return signed_message
         
     except Exception as e:
-        logger.warning(f"  ✗ Erro ao assinar DKIM: {e}")
+        logger.warning(f"  ⚠ DKIM erro: {e}")
         return message.as_bytes()
 
 def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
-    """Envia email via KumoMTA"""
     logger.info(f"Enviando para {recipient}...")
     
     try:
@@ -192,7 +179,6 @@ def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
         msg['Date'] = email.utils.formatdate(localtime=True)
         msg['Message-ID'] = f"<{tracking_hash}@{account['full_domain']}>"
         
-        # Aplicar mutação
         html_content = apply_mutation(
             EMAIL_TEMPLATE_HTML,
             tracking_hash,
@@ -203,14 +189,12 @@ def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
         msg.attach(MIMEText("Ver versão em HTML", 'plain'))
         msg.attach(MIMEText(html_content, 'html'))
         
-        # Assinar
         signed_message = sign_email_with_dkim(msg, account)
         
-        # Enviar via SMTP
         host = account.get('kumomta_host', 'localhost')
         port = account.get('kumomta_port', 2525)
         
-        logger.info(f"  → Conectando ao SMTP ({host}:{port})...")
+        logger.info(f"  → SMTP ({host}:{port})...")
         
         with smtplib.SMTP(host, port, timeout=10) as smtp:
             try:
@@ -218,17 +202,17 @@ def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
             except:
                 pass
             
-            result = smtp.sendmail(
+            smtp.sendmail(
                 account['address'],
                 recipient,
                 signed_message
             )
             
-            logger.info(f"  ✓ Email enviado: {recipient}")
+            logger.info(f"  ✓ Enviado: {recipient}")
             return True
             
     except Exception as e:
-        logger.error(f"  ✗ Erro ao enviar para {recipient}: {e}")
+        logger.error(f"  ✗ Erro: {recipient}: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -240,27 +224,21 @@ def main():
     
     try:
         account = load_account_from_hf()
-        
-        logger.info(f"\nEnviando {len(TEST_RECIPIENTS)} emails de teste...\n")
+        logger.info(f"\nEnviando {len(TEST_RECIPIENTS)} emails...\n")
         
         results = {}
         for idx, recipient in enumerate(TEST_RECIPIENTS, 1):
             tracking_hash = generate_tracking_hash(account['address'], recipient)
-            
             logger.info(f"\n[{idx}/{len(TEST_RECIPIENTS)}] {recipient}")
             success = send_email_via_smtp(account, recipient, tracking_hash, email_num=1)
             
             results[recipient] = {
                 "success": success,
                 "timestamp": datetime.utcnow().isoformat() + "Z",
-                "account": account['address'],
                 "tracking_hash": tracking_hash
             }
         
         logger.info("\n" + "=" * 80)
-        logger.info("RESUMO DE ENVIO:")
-        logger.info("=" * 80)
-        
         success_count = sum(1 for r in results.values() if r['success'])
         logger.info(f"✓ Sucesso: {success_count}/{len(TEST_RECIPIENTS)}")
         
@@ -273,7 +251,7 @@ def main():
         return success_count == len(TEST_RECIPIENTS)
         
     except Exception as e:
-        logger.error(f"\n✗ ERRO FATAL: {e}", exc_info=True)
+        logger.error(f"✗ ERRO: {e}", exc_info=True)
         return False
 
 if __name__ == "__main__":
