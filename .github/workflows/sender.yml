@@ -29,12 +29,17 @@ jobs:
           sudo -E python3 -c "
           import os, sys
 
-          key = os.environ.get('WG_KEY', '').strip()
-          ip = os.environ.get('WG_IP', '').strip()
-          endpoint = os.environ.get('WG_END', '').strip()
+          key = os.environ.get('WG_KEY', '').strip().replace('\n', '').replace('\r', '').replace(' ', '')
+          ip = os.environ.get('WG_IP', '').strip().replace('\n', '').replace('\r', '').replace(' ', '')
+          endpoint = os.environ.get('WG_END', '').strip().replace('\n', '').replace('\r', '').replace(' ', '')
 
-          if not key or not ip or not endpoint:
-              print('❌ ERRO CRÍTICO: Secrets não foram carregadas no ambiente!')
+          print(f'-> Tamanho da Chave Privada lida: {len(key)} caracteres')
+          print(f'-> IP configurado: {ip}')
+          print(f'-> Endpoint configurado: {endpoint}')
+
+          if len(key) != 44:
+              print(f'❌ ERRO CRÍTICO: A chave privada tem {len(key)} caracteres, mas o WireGuard exige exatamente 44!')
+              print('Verifica e recola a secret ROUTE64_WG_PRIVATE_KEY em Settings -> Secrets and variables -> Actions')
               sys.exit(1)
 
           conf = f'''[Interface]
