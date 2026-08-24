@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-Envio de emails de teste via KumoMTA
-- Carrega conta do HuggingFace
-- Aplica mutação básica (parâmetros únicos)
-- Assina com DKIM
-- Envia para 2 endereços de teste
+Envio de emails de teste via KumoMTA - VERSÃO CORRIGIDA
 """
 
 import os
@@ -12,18 +8,19 @@ import json
 import logging
 import smtplib
 import hashlib
-import email
-import re
+import email.utils
 from pathlib import Path
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from huggingface_hub import hf_hub_download
-import dkim
+from dkimpy import sign
 
-# ============================================================================
-# CONFIG
-# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 HF_TOKEN = os.getenv("HF_TOKEN")
 HF_REPO = os.getenv("HF_REPO", "veriscope/checkpoints")
@@ -33,39 +30,25 @@ TEST_RECIPIENTS = [
     "Info1yenom@gmail.com"
 ]
 
-# ============================================================================
-# LOGGING
-# ============================================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
-logger = logging.getLogger(__name__)
-
-# ============================================================================
-# EMAIL TEMPLATE (Email 1 da Sequência)
-# ============================================================================
-
-EMAIL_TEMPLATE_HTML = """
-<!DOCTYPE html>
+# ⚠️ TEMPLATE CORRIGIDA - {{ }} escapado para {{{{ }}}}
+EMAIL_TEMPLATE_HTML = """<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
   <title>Veriscope — Session Matrix</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 20px; }
-    .container { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .header { background: linear-gradient(135deg, #1a3a52 0%, #2d5a7a 100%); padding: 40px 20px; text-align: center; }
-    .logo { font-size: 28px; font-weight: bold; color: #c9a961; margin-bottom: 10px; }
-    .content { padding: 40px 30px; line-height: 1.6; color: #333; }
-    .content h2 { font-size: 20px; margin: 0 0 20px 0; color: #1a3a52; }
-    .content p { margin: 15px 0; font-size: 15px; }
-    .cta-button { display: inline-block; background: #c9a961; color: #1a3a52; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; margin: 25px 0; }
-    .cta-button:hover { background: #b39351; }
-    .footer { background: #f9f9f9; padding: 20px 30px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #eee; }
-    .footer a { color: #c9a961; text-decoration: none; }
-    .signature { margin-top: 20px; font-weight: 600; }
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background-color: #f5f5f5; margin: 0; padding: 20px; }}
+    .container {{ max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }}
+    .header {{ background: linear-gradient(135deg, #1a3a52 0%, #2d5a7a 100%); padding: 40px 20px; text-align: center; }}
+    .logo {{ font-size: 28px; font-weight: bold; color: #c9a961; margin-bottom: 10px; }}
+    .content {{ padding: 40px 30px; line-height: 1.6; color: #333; }}
+    .content h2 {{ font-size: 20px; margin: 0 0 20px 0; color: #1a3a52; }}
+    .content p {{ margin: 15px 0; font-size: 15px; }}
+    .cta-button {{ display: inline-block; background: #c9a961; color: #1a3a52; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; margin: 25px 0; }}
+    .cta-button:hover {{ background: #b39351; }}
+    .footer {{ background: #f9f9f9; padding: 20px 30px; text-align: center; font-size: 12px; color: #888; border-top: 1px solid #eee; }}
+    .footer a {{ color: #c9a961; text-decoration: none; }}
+    .signature {{ margin-top: 20px; font-weight: 600; }}
   </style>
 </head>
 <body>
@@ -115,17 +98,11 @@ EMAIL_TEMPLATE_HTML = """
     <div class="footer">
       <p>© 2026 Veriscope. Todos os direitos reservados.</p>
       <p><a href="https://veriscope.com/unsubscribe?email={recipient_email}">Cancelar inscrição</a></p>
-      <!-- Pixel de tracking -->
       <img src="https://tracking.veriscope.com/pixel?lead={recipient_email}&email=1&hash={tracking_hash}" width="1" height="1" style="display:none;" alt="">
     </div>
   </div>
 </body>
-</html>
-"""
-
-# ============================================================================
-# FUNÇÕES AUXILIARES
-# ============================================================================
+</html>"""
 
 def load_account_from_hf():
     """Carrega dados da conta do HuggingFace"""
@@ -153,12 +130,12 @@ def load_account_from_hf():
         raise
 
 def generate_tracking_hash(email, recipient):
-    """Gera hash único para rastreamento (evita fuzzy hashing)"""
+    """Gera hash único para rastreamento"""
     unique_str = f"{email}:{recipient}:{datetime.utcnow().isoformat()}"
     return hashlib.sha256(unique_str.encode()).hexdigest()[:16]
 
 def apply_mutation(html_content, tracking_hash, recipient_email, email_num):
-    """Aplica mutação ao HTML (parâmetros únicos)"""
+    """Aplica mutação ao HTML"""
     logger.info(f"  → Aplicando mutação para {recipient_email}...")
     
     # Substituir placeholders
@@ -168,7 +145,7 @@ def apply_mutation(html_content, tracking_hash, recipient_email, email_num):
         email_number=email_num
     )
     
-    # Adicionar elemento DOM invisível aleatório (varia o hash SSDEEP)
+    # Adicionar elemento DOM invisível
     rnd_class = f"rnd_{tracking_hash[:8]}"
     invisible_div = f'<div style="display:none;" class="{rnd_class}"><!-- {tracking_hash} --></div>'
     content = content.replace("</body>", f"{invisible_div}</body>")
@@ -183,12 +160,10 @@ def sign_email_with_dkim(message, account):
     selector = account['dkim_selector'].encode('utf-8')
     private_key = account['dkim_private_key'].encode('utf-8')
     
-    # Headers a assinar
     headers_to_sign = [b'from', b'to', b'subject', b'date']
     
     try:
-        # Assinar mensagem
-        sig = dkim.sign(
+        sig = sign(
             message.as_bytes(),
             selector,
             domain,
@@ -196,7 +171,6 @@ def sign_email_with_dkim(message, account):
             include_headers=headers_to_sign
         )
         
-        # Juntar assinatura com mensagem
         signed_message = sig + message.as_bytes()
         
         logger.info("  ✓ DKIM assinado")
@@ -204,15 +178,13 @@ def sign_email_with_dkim(message, account):
         
     except Exception as e:
         logger.warning(f"  ✗ Erro ao assinar DKIM: {e}")
-        # Retornar sem assinatura como fallback
         return message.as_bytes()
 
 def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
-    """Envia email via KumoMTA (SMTP)"""
+    """Envia email via KumoMTA"""
     logger.info(f"Enviando para {recipient}...")
     
     try:
-        # Criar mensagem
         msg = MIMEMultipart('alternative')
         msg['From'] = f"{account['sender_name']} <{account['address']}>"
         msg['To'] = recipient
@@ -220,7 +192,7 @@ def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
         msg['Date'] = email.utils.formatdate(localtime=True)
         msg['Message-ID'] = f"<{tracking_hash}@{account['full_domain']}>"
         
-        # Aplicar mutação ao HTML
+        # Aplicar mutação
         html_content = apply_mutation(
             EMAIL_TEMPLATE_HTML,
             tracking_hash,
@@ -228,30 +200,24 @@ def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
             email_num
         )
         
-        # Adicionar conteúdo
-        msg.attach(MIMEText(
-            "Ver versão em HTML: https://veriscope.com/email",
-            'plain'
-        ))
+        msg.attach(MIMEText("Ver versão em HTML", 'plain'))
         msg.attach(MIMEText(html_content, 'html'))
         
-        # Assinar com DKIM
+        # Assinar
         signed_message = sign_email_with_dkim(msg, account)
         
-        # Conectar ao SMTP (KumoMTA)
+        # Enviar via SMTP
         host = account.get('kumomta_host', 'localhost')
         port = account.get('kumomta_port', 2525)
         
         logger.info(f"  → Conectando ao SMTP ({host}:{port})...")
         
         with smtplib.SMTP(host, port, timeout=10) as smtp:
-            # Desabilitar STARTTLS se necessário
             try:
                 smtp.starttls()
             except:
-                pass  # KumoMTA pode não requerer TLS em localhost
+                pass
             
-            # Enviar
             result = smtp.sendmail(
                 account['address'],
                 recipient,
@@ -263,11 +229,9 @@ def send_email_via_smtp(account, recipient, tracking_hash, email_num=1):
             
     except Exception as e:
         logger.error(f"  ✗ Erro ao enviar para {recipient}: {e}")
+        import traceback
+        traceback.print_exc()
         return False
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 def main():
     logger.info("=" * 80)
@@ -275,10 +239,8 @@ def main():
     logger.info("=" * 80)
     
     try:
-        # 1. Carregar conta
         account = load_account_from_hf()
         
-        # 2. Enviar para cada recipient
         logger.info(f"\nEnviando {len(TEST_RECIPIENTS)} emails de teste...\n")
         
         results = {}
@@ -295,7 +257,6 @@ def main():
                 "tracking_hash": tracking_hash
             }
         
-        # 3. Resumo
         logger.info("\n" + "=" * 80)
         logger.info("RESUMO DE ENVIO:")
         logger.info("=" * 80)
@@ -307,24 +268,6 @@ def main():
             status = "✓" if result['success'] else "✗"
             logger.info(f"  {status} {recipient}")
         
-        logger.info("=" * 80)
-        
-        logger.info("\n📧 INSTRUÇÕES PARA VALIDAÇÃO:")
-        logger.info("=" * 80)
-        logger.info("1. Verifique as caixas de entrada nos próximos 2-5 minutos:")
-        logger.info("   - macuacuavalter71@gmail.com")
-        logger.info("   - Info1yenom@gmail.com")
-        logger.info("\n2. Para cada email, valide:")
-        logger.info("   ✓ Chegou à caixa de entrada (não spam)")
-        logger.info("   ✓ Sender: alex@sub0.veriscope0.dedyn.io")
-        logger.info("   ✓ Nome visível: Alex | Liquidity Alert")
-        logger.info("   ✓ Botão funciona e leva a https://veriscope-com-session-matrix.pages.dev/")
-        logger.info("   ✓ Cabeçalhos contêm DKIM-Signature válida")
-        logger.info("   ✓ Pixel de tracking carregou (1×1)")
-        logger.info("\n3. Headers técnicos (Gmail: ⋮ > Mostrar original):")
-        logger.info("   ✓ DKIM-Signature: (assinatura deve estar presente)")
-        logger.info("   ✓ From: alex@sub0.veriscope0.dedyn.io")
-        logger.info("   ✓ Sem warnings de SPF/DKIM/DMARC")
         logger.info("=" * 80)
         
         return success_count == len(TEST_RECIPIENTS)
