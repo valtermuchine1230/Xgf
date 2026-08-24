@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: Instalar Dependências e WireGuard
+      - name: Instalar Dependências do Sistema
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils wireguard-tools resolvconf
@@ -26,11 +26,16 @@ jobs:
           WG_IP: ${{ secrets.ROUTE64_IPV6 }}
           WG_END: ${{ secrets.ROUTE64_ENDPOINT }}
         run: |
-          sudo python3 -c "
-          import os
+          sudo -E python3 -c "
+          import os, sys
+
           key = os.environ.get('WG_KEY', '').strip()
           ip = os.environ.get('WG_IP', '').strip()
           endpoint = os.environ.get('WG_END', '').strip()
+
+          if not key or not ip or not endpoint:
+              print('❌ ERRO CRÍTICO: Secrets não foram carregadas no ambiente!')
+              sys.exit(1)
 
           conf = f'''[Interface]
           PrivateKey = {key}
@@ -54,7 +59,6 @@ jobs:
 
       - name: Configurar Postfix para IPv6 Route64
         run: |
-          # Extrai apenas o endereço IP sem a máscara /64
           IPV6_ADDR=$(echo "${{ secrets.ROUTE64_IPV6 }}" | cut -d'/' -f1)
           
           sudo postconf -e "myhostname = sub.veriscope.dedyn.io"
@@ -66,10 +70,10 @@ jobs:
           
           sudo service postfix restart
 
-      - name: Instalar Pacotes Python
+      - name: Instalar Libs Python
         run: |
           python -m pip install --upgrade pip
-          pip install requests dkimpy cryptography dnspython
+          pip install requests dkimpy cryptography dnspython pillow
 
       - name: Executar Disparo com Python
         env:
@@ -78,7 +82,7 @@ jobs:
         run: |
           python teste_envio.py
 
-      - name: Aguardar Processamento
+      - name: Aguardar Processamento Fila
         run: sleep 10
 
       - name: LOGS REAIS DE ENTREGA SMTP
