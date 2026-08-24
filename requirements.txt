@@ -1,6 +1,11 @@
-aiosmtplib==3.0.2
-dkimpy==1.1.0
-cryptography==42.0.8
-huggingface-hub==0.24.6
-requests==2.32.3
-python-dotenv==1.0.1
+# Email & SMTP
+dkim==0.9.11
+cryptography==41.0.7
+
+# API & Data
+requests==2.31.0
+huggingface-hub==0.19.4
+python-dotenv==1.0.0
+
+# Utilities
+pathlib2==2.3.0 ; python_version < '3.4'
