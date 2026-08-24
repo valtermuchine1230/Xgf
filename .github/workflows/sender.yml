@@ -1,132 +1,129 @@
-name: Veriscope Test – WireGuard + Envio
+name: 🧪 Teste de Provisão & Envio
 
 on:
   workflow_dispatch:
+    inputs:
+      skip_provision:
+        description: 'Skip provisioning (use existing account)?'
+        required: false
+        default: 'false'
 
 jobs:
-  send:
+  test-provision-and-send:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 15
+    
     steps:
-      - name: Checkout
+      # ========================================================================
+      # 1. SETUP
+      # ========================================================================
+      
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
+      
+      - name: 🐍 Setup Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
+          python-version: '3.10'
+      
+      - name: 📦 Instalar dependências
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Install WireGuard
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y wireguard wireguard-tools
-
-      - name: Configure and start WireGuard tunnel
-        run: |
-          # Configuração do túnel Toronto (gerado pela Route64)
-          sudo tee /etc/wireguard/wg0.conf > /dev/null << 'EOF'
-          [Interface]
-          PrivateKey = AHByJsim+rlrtck2V11/BF4ospeBhAtcY83FvR5rgnI=
-          Address = 2a11:6c7:f35:dd::2/64
-          MTU = 1420
-
-          [Peer]
-          PublicKey = IXIO5G3mpyk8P9Em7clyY10v8iInSVqlV7++FxFMtQ0=
-          Endpoint = 23.154.9.27:20109
-          AllowedIPs = ::/0
-          PersistentKeepalive = 15
-          EOF
-
-          # Subir o túnel
-          sudo wg-quick up wg0
-
-          # Adicionar o endereço que usamos no SPF (::10)
-          sudo ip -6 addr add 2a11:6c7:f35:dd::10/128 dev wg0
-
-          # Verificar
-          echo "=== WireGuard status ==="
-          sudo wg show
-          echo "=== Endereços IPv6 ==="
-          ip -6 addr show wg0
-          echo "=== Teste de conectividade ==="
-          ping6 -c 3 2a11:6c7:f35:dd::1 || true
-
-      - name: Start KumoMTA
-        run: |
-          mkdir -p policy
-          cat > policy/init.lua << 'EOF'
-          local kumo = require 'kumo'
-          kumo.on('init', function()
-            kumo.start_esmtp_listener {
-              listen = '0.0.0.0:2525',
-              relay_hosts = { '127.0.0.1', '::1', '0.0.0.0/0' },
-            }
-            kumo.define_spool { name = 'data', path = '/tmp/kumo/data' }
-            kumo.define_spool { name = 'meta', path = '/tmp/kumo/meta' }
-          end)
-          kumo.on('smtp_server_message_received', function(msg)
-            msg:set_meta('queue', 'default')
-          end)
-          EOF
-
-          docker run -d --name kumomta \
-            --network host \
-            -v $(pwd)/policy:/opt/kumomta/etc/policy \
-            ghcr.io/kumocorp/kumomta:latest
-
-          sleep 10
-          docker ps | grep kumomta || (echo "KumoMTA falhou" && docker logs kumomta && exit 1)
-
-      - name: Run Veriscope Sender
+          pip install \
+            huggingface-hub \
+            cryptography \
+            dkim \
+            requests \
+            python-dotenv
+      
+      # ========================================================================
+      # 2. PROVISÃO DE CONTA (se necessário)
+      # ========================================================================
+      
+      - name: 🔑 Provisionar conta única (sub0.veriscope0.dedyn.io)
+        if: github.event.inputs.skip_provision != 'true'
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: Valter3B/veriscope_checkpoints
-          DESEC_DOMAIN: veriscope0.dedyn.io
+          DESEC_DOMAIN: ${{ secrets.DESEC_DOMAIN }}
           DESEC_TOKEN_1: ${{ secrets.DESEC_TOKEN_1 }}
-          DESEC_TOKEN_2: ${{ secrets.DESEC_TOKEN_2 }}
-          DESEC_TOKEN_3: ${{ secrets.DESEC_TOKEN_3 }}
-          DESEC_TOKEN_4: ${{ secrets.DESEC_TOKEN_4 }}
-          DESEC_TOKEN_5: ${{ secrets.DESEC_TOKEN_5 }}
-          DESEC_TOKEN_6: ${{ secrets.DESEC_TOKEN_6 }}
-          DESEC_TOKEN_7: ${{ secrets.DESEC_TOKEN_7 }}
-          DESEC_TOKEN_8: ${{ secrets.DESEC_TOKEN_8 }}
-          DESEC_TOKEN_9: ${{ secrets.DESEC_TOKEN_9 }}
-          DESEC_TOKEN_10: ${{ secrets.DESEC_TOKEN_10 }}
-          DESEC_TOKEN_11: ${{ secrets.DESEC_TOKEN_11 }}
-          DESEC_TOKEN_12: ${{ secrets.DESEC_TOKEN_12 }}
-          DESEC_TOKEN_13: ${{ secrets.DESEC_TOKEN_13 }}
-          DESEC_TOKEN_14: ${{ secrets.DESEC_TOKEN_14 }}
-          DESEC_TOKEN_15: ${{ secrets.DESEC_TOKEN_15 }}
-          DESEC_TOKEN_16: ${{ secrets.DESEC_TOKEN_16 }}
-          DESEC_TOKEN_17: ${{ secrets.DESEC_TOKEN_17 }}
-          DESEC_TOKEN_18: ${{ secrets.DESEC_TOKEN_18 }}
-          DESEC_TOKEN_19: ${{ secrets.DESEC_TOKEN_19 }}
-          DESEC_TOKEN_20: ${{ secrets.DESEC_TOKEN_20 }}
-          DESEC_TOKEN_21: ${{ secrets.DESEC_TOKEN_21 }}
-          DESEC_TOKEN_22: ${{ secrets.DESEC_TOKEN_22 }}
-          DESEC_TOKEN_23: ${{ secrets.DESEC_TOKEN_23 }}
-          DESEC_TOKEN_24: ${{ secrets.DESEC_TOKEN_24 }}
-          DESEC_TOKEN_25: ${{ secrets.DESEC_TOKEN_25 }}
-          DESEC_TOKEN_26: ${{ secrets.DESEC_TOKEN_26 }}
           ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
           ROUTE64_API_URL: ${{ secrets.ROUTE64_API_URL }}
-          KUMOMTA_HOST: 127.0.0.1
-          KUMOMTA_PORT: 2525
-          KUMOMTA_FROM_NAME: Alex | Veriscope
-        run: python veriscope_sender.py --full
-
-      - name: Upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+          KUMOMTA_HOST: ${{ secrets.KUMOMTA_HOST }}
+          KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
+        run: |
+          python provision_single_account.py
+        continue-on-error: true  # Continuar se deSEC API falhar (conta já existe)
+      
+      # ========================================================================
+      # 3. AGUARDAR PROPAGAÇÃO DNS (importante!)
+      # ========================================================================
+      
+      - name: ⏳ Aguardando propagação DNS (30 segundos)
+        run: sleep 30
+      
+      # ========================================================================
+      # 4. VALIDAR DNS (opcional)
+      # ========================================================================
+      
+      - name: 🔍 Validar registos DNS
+        run: |
+          echo "Verificando SPF para sub0.veriscope0.dedyn.io..."
+          nslookup -type=TXT sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
+          
+          echo "Verificando DKIM para s2026.sub0.veriscope0.dedyn.io..."
+          nslookup -type=TXT s2026.sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
+          
+          echo "Verificando DMARC para _dmarc.sub0.veriscope0.dedyn.io..."
+          nslookup -type=TXT _dmarc.sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
+        continue-on-error: true
+      
+      # ========================================================================
+      # 5. ENVIAR EMAILS DE TESTE
+      # ========================================================================
+      
+      - name: 📧 Enviar emails de teste
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+          KUMOMTA_HOST: ${{ secrets.KUMOMTA_HOST }}
+          KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
+        run: |
+          python send_test.py
+      
+      # ========================================================================
+      # 6. RELATÓRIO FINAL
+      # ========================================================================
+      
+      - name: 📊 Gerar relatório
+        run: |
+          echo "✓ Teste concluído!"
+          echo ""
+          echo "📌 PRÓXIMOS PASSOS:"
+          echo "1. Verifique os emails de teste:"
+          echo "   - macuacuavalter71@gmail.com"
+          echo "   - Info1yenom@gmail.com"
+          echo ""
+          echo "2. Valide:"
+          echo "   ✓ Chegaram à caixa de entrada"
+          echo "   ✓ SPF/DKIM/DMARC passaram"
+          echo "   ✓ Links funcionam"
+          echo "   ✓ Imagens carregaram"
+          echo ""
+          echo "3. Se OK, execute a campanha real:"
+          echo "   $ python enviador_smtp.py (para 30M leads)"
+      
+      # ========================================================================
+      # 7. UPLOAD DE LOGS (se falhar)
+      # ========================================================================
+      
+      - name: 📤 Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v3
         with:
-          name: veriscope-logs
+          name: test-logs
           path: |
-            veriscope.log
-            data/
+            *.log
+            provision_single_account.log
+            send_test.log
+        continue-on-error: true
