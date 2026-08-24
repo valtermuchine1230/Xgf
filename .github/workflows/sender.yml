@@ -14,10 +14,6 @@ jobs:
     timeout-minutes: 15
     
     steps:
-      # ========================================================================
-      # 1. SETUP
-      # ========================================================================
-      
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
       
@@ -36,10 +32,6 @@ jobs:
             requests \
             python-dotenv
       
-      # ========================================================================
-      # 2. PROVISÃO DE CONTA (se necessário)
-      # ========================================================================
-      
       - name: 🔑 Provisionar conta única (sub0.veriscope0.dedyn.io)
         if: github.event.inputs.skip_provision != 'true'
         env:
@@ -53,18 +45,10 @@ jobs:
           KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
         run: |
           python provision_single_account.py
-        continue-on-error: true  # Continuar se deSEC API falhar (conta já existe)
-      
-      # ========================================================================
-      # 3. AGUARDAR PROPAGAÇÃO DNS (importante!)
-      # ========================================================================
+        continue-on-error: true
       
       - name: ⏳ Aguardando propagação DNS (30 segundos)
         run: sleep 30
-      
-      # ========================================================================
-      # 4. VALIDAR DNS (opcional)
-      # ========================================================================
       
       - name: 🔍 Validar registos DNS
         run: |
@@ -78,10 +62,6 @@ jobs:
           nslookup -type=TXT _dmarc.sub0.veriscope0.dedyn.io || echo "⚠ DNS ainda não propagado, continuando..."
         continue-on-error: true
       
-      # ========================================================================
-      # 5. ENVIAR EMAILS DE TESTE
-      # ========================================================================
-      
       - name: 📧 Enviar emails de teste
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -90,10 +70,6 @@ jobs:
           KUMOMTA_PORT: ${{ secrets.KUMOMTA_PORT }}
         run: |
           python send_test.py
-      
-      # ========================================================================
-      # 6. RELATÓRIO FINAL
-      # ========================================================================
       
       - name: 📊 Gerar relatório
         run: |
@@ -113,13 +89,9 @@ jobs:
           echo "3. Se OK, execute a campanha real:"
           echo "   $ python enviador_smtp.py (para 30M leads)"
       
-      # ========================================================================
-      # 7. UPLOAD DE LOGS (se falhar)
-      # ========================================================================
-      
       - name: 📤 Upload logs
         if: failure()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-logs
           path: |
