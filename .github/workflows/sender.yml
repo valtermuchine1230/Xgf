@@ -1,10 +1,32 @@
+name: Teste de Entregabilidade SMTP via Route64 WireGuard
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test_sending:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Instalar Dependências e WireGuard
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix mailutils wireguard-tools resolvconf
+
       - name: Configurar e Subir Túnel WireGuard (Route64)
         env:
           WG_KEY: ${{ secrets.ROUTE64_WG_PRIVATE_KEY }}
           WG_IP: ${{ secrets.ROUTE64_IPV6 }}
           WG_END: ${{ secrets.ROUTE64_ENDPOINT }}
         run: |
-          python3 -c "
+          sudo python3 -c "
           import os
           key = os.environ.get('WG_KEY', '').strip()
           ip = os.environ.get('WG_IP', '').strip()
@@ -29,3 +51,44 @@
           sudo wg-quick up wg0
           echo "=== INTERFACE WIREGUARD ATIVA ==="
           sudo wg show
+
+      - name: Configurar Postfix para IPv6 Route64
+        run: |
+          # Extrai apenas o endereço IP sem a máscara /64
+          IPV6_ADDR=$(echo "${{ secrets.ROUTE64_IPV6 }}" | cut -d'/' -f1)
+          
+          sudo postconf -e "myhostname = sub.veriscope.dedyn.io"
+          sudo postconf -e "mydomain = veriscope.dedyn.io"
+          sudo postconf -e "myorigin = sub.veriscope.dedyn.io"
+          sudo postconf -e "inet_interfaces = all"
+          sudo postconf -e "inet_protocols = ipv6"
+          sudo postconf -e "smtp_bind_address6 = $IPV6_ADDR"
+          
+          sudo service postfix restart
+
+      - name: Instalar Pacotes Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests dkimpy cryptography dnspython
+
+      - name: Executar Disparo com Python
+        env:
+          ROUTE64_API_KEY: ${{ secrets.ROUTE64_API_KEY }}
+          ROUTE64_IPV6: ${{ secrets.ROUTE64_IPV6 }}
+        run: |
+          python teste_envio.py
+
+      - name: Aguardar Processamento
+        run: sleep 10
+
+      - name: LOGS REAIS DE ENTREGA SMTP
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "       ESTADO DA FILA DO POSTFIX          "
+          echo "=========================================="
+          sudo mailq
+          echo "=========================================="
+          echo "         LOGS DO SERVIDOR SMTP            "
+          echo "=========================================="
+          sudo cat /var/log/mail.log || sudo journalctl -u postfix --no-pager -n 80
