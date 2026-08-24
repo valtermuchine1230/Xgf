@@ -203,8 +203,94 @@ def main():
         # 1. Gerar chaves DKIM
         private_key, public_key_b64 = generate_rsa_keypair()
         
-        # 2. Criar sub-domínio no deSEC
-        create_desec_subdomain(SUBDOMAIN, DESEC_DOMAIN, public_key_b64)
+        # 2. Criar sub-domínio no 
+        def create_desec_subdomain(subdomain, domain, dkim_public_key):
+    """Cria sub-subdomínio no deSEC e configura registos"""
+    logger.info(f"Configurando {subdomain}.{domain} no deSEC...")
+    
+    if not DESEC_TOKEN:
+        raise ValueError("DESEC_TOKEN_1 não configurado")
+    
+    base_url = f"https://desec.io/api/v1/domains/{domain}/rrsets/"
+    headers = {
+        "Authorization": f"Token {DESEC_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    # 1. SPF Record
+    logger.info(f"  → Criando SPF para {subdomain}...")
+    try:
+        spf_data = {
+            "subname": subdomain,
+            "type": "TXT",
+            "ttl": 3600,
+            "records": [{"contents": "v=spf1 mx ~all"}]
+        }
+        resp = requests.put(
+            f"{base_url}",
+            params={"subname": subdomain, "type": "TXT"},
+            headers=headers,
+            json=spf_data,
+            timeout=10
+        )
+        logger.info(f"     Response: {resp.status_code}")
+        if resp.status_code not in [200, 201]:
+            logger.warning(f"  ✗ SPF error ({resp.status_code}): {resp.text}")
+        else:
+            logger.info(f"  ✓ SPF criado")
+    except Exception as e:
+        logger.warning(f"  ✗ SPF exception: {e}")
+    
+    # 2. DKIM Record
+    logger.info(f"  → Criando DKIM para {DKIM_SELECTOR}.{subdomain}...")
+    try:
+        dkim_record = f"v=DKIM1; k=rsa; p={dkim_public_key}"
+        dkim_data = {
+            "subname": f"{DKIM_SELECTOR}.{subdomain}",
+            "type": "TXT",
+            "ttl": 3600,
+            "records": [{"contents": dkim_record}]
+        }
+        resp = requests.put(
+            f"{base_url}",
+            params={"subname": f"{DKIM_SELECTOR}.{subdomain}", "type": "TXT"},
+            headers=headers,
+            json=dkim_data,
+            timeout=10
+        )
+        logger.info(f"     Response: {resp.status_code}")
+        if resp.status_code not in [200, 201]:
+            logger.warning(f"  ✗ DKIM error ({resp.status_code}): {resp.text}")
+        else:
+            logger.info(f"  ✓ DKIM criado")
+    except Exception as e:
+        logger.warning(f"  ✗ DKIM exception: {e}")
+    
+    # 3. DMARC Record
+    logger.info(f"  → Criando DMARC para _dmarc.{subdomain}...")
+    try:
+        dmarc_data = {
+            "subname": f"_dmarc.{subdomain}",
+            "type": "TXT",
+            "ttl": 3600,
+            "records": [{"contents": "v=DMARC1; p=quarantine;"}]
+        }
+        resp = requests.put(
+            f"{base_url}",
+            params={"subname": f"_dmarc.{subdomain}", "type": "TXT"},
+            headers=headers,
+            json=dmarc_data,
+            timeout=10
+        )
+        logger.info(f"     Response: {resp.status_code}")
+        if resp.status_code not in [200, 201]:
+            logger.warning(f"  ✗ DMARC error ({resp.status_code}): {resp.text}")
+        else:
+            logger.info(f"  ✓ DMARC criado")
+    except Exception as e:
+        logger.warning(f"  ✗ DMARC exception: {e}")
+    
+    logger.info(f"✓ {subdomain}.{domain} configurado no deSEC")
         
         # 3. Alocar IPv6 (informativo)
         ipv6 = allocate_ipv6_route64()
