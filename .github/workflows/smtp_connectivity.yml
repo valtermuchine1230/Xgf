@@ -1,0 +1,119 @@
+name: Verificação segura de conectividade SMTP
+
+on:
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: "Ligações concorrentes (1-5)"
+        required: false
+        default: "3"
+      delay:
+        description: "Pausa por domínio em segundos"
+        required: false
+        default: "1.0"
+
+permissions:
+  contents: read
+
+jobs:
+  connectivity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      HF_DATASET: Valter3B/Trader_Emails
+      SMTP_SCAN_WORKERS: ${{ inputs.workers }}
+      SMTP_SCAN_DELAY: ${{ inputs.delay }}
+      SMTP_SCAN_TIMEOUT: "8"
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      ROUTE64_WG_PRIVATE_KEY: ${{ secrets.ROUTE64_WG_PRIVATE_KEY }}
+      ROUTE64_WG_IPV6_CIDR: ${{ secrets.ROUTE64_WG_IPV6_CIDR }}
+      ROUTE64_WG_PEER_PUBLIC_KEY: ${{ secrets.ROUTE64_WG_PEER_PUBLIC_KEY }}
+      ROUTE64_WG_ENDPOINT: ${{ secrets.ROUTE64_WG_ENDPOINT }}
+      ROUTE64_GATEWAY_IPV6: ${{ secrets.ROUTE64_GATEWAY_IPV6 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependências
+        run: python -m pip install --upgrade pip dnspython requests pyarrow
+
+      - name: Instalar WireGuard
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard-tools iproute2 ca-certificates
+
+      - name: Validar variáveis sem imprimir segredos
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in ROUTE64_WG_PRIVATE_KEY ROUTE64_WG_IPV6_CIDR ROUTE64_WG_PEER_PUBLIC_KEY ROUTE64_WG_ENDPOINT; do
+            if [ -z "${!name:-}" ]; then echo "Variável ausente: $name"; exit 1; fi
+            echo "$name=present"
+          done
+
+      - name: Subir túnel IPv6 Route64
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -d -m 700 /etc/wireguard
+          sudo tee /etc/wireguard/wg0.conf >/dev/null <<EOF
+          [Interface]
+          PrivateKey = ${ROUTE64_WG_PRIVATE_KEY}
+          Address = ${ROUTE64_WG_IPV6_CIDR}
+          Table = off
+
+          [Peer]
+          PublicKey = ${ROUTE64_WG_PEER_PUBLIC_KEY}
+          AllowedIPs = ::/0
+          Endpoint = ${ROUTE64_WG_ENDPOINT}
+          PersistentKeepalive = 25
+          EOF
+          sudo chmod 600 /etc/wireguard/wg0.conf
+          sudo wg-quick up wg0
+          sudo ip -6 route add default dev wg0 metric 1024 2>/dev/null || true
+          echo "WireGuard interface:"
+          sudo wg show
+          echo "IPv6 egress check (address only):"
+          curl -6 --max-time 10 https://api64.ipify.org || true
+
+      - name: Executar verificação sem envio
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python check_smtp_connectivity.py \
+            --dataset "$HF_DATASET" \
+            --workers "$SMTP_SCAN_WORKERS" \
+            --delay "$SMTP_SCAN_DELAY" \
+            --timeout "$SMTP_SCAN_TIMEOUT" \
+            --output smtp_connectivity_report.csv
+
+      - name: Guardar diagnóstico e logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo wg show > wireguard_status.txt 2>&1
+          ip -6 route show > ipv6_routes.txt 2>&1
+          echo "Nenhuma operação MAIL FROM, RCPT TO ou DATA foi executada." > test_scope.txt
+
+      - name: Descer túnel
+        if: always()
+        run: sudo wg-quick down wg0 2>/dev/null || true
+
+      - name: Publicar relatório
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smtp-connectivity-report
+          if-no-files-found: warn
+          path: |
+            smtp_connectivity_report.csv
+            wireguard_status.txt
+            ipv6_routes.txt
+            test_scope.txt
