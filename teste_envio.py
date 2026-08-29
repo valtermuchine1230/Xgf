@@ -24,6 +24,8 @@ RECIPIENTS = [
     "au-sbrooks80@aliasvault.net",
     "probbins87@aliasvault.net",
     "Info1yenom@gmail.com"
+    "servicey.enom@proton.me",
+"valterafonsomacuacuafuturobilion@yahoo.com",
 ]
 
 print("--- 🌐 STEP 1: CONFIGURANDO rDNS NA ROUTE64 ---")
